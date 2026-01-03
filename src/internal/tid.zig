@@ -119,3 +119,25 @@ test "roundtrip" {
     try std.testing.expectEqual(ts, tid.timestamp());
     try std.testing.expectEqual(clock, tid.clockId());
 }
+
+test "valid first chars" {
+    // first char must be 2-7 only
+    try std.testing.expect(Tid.parse("2222222222222") != null);
+    try std.testing.expect(Tid.parse("3222222222222") != null);
+    try std.testing.expect(Tid.parse("4222222222222") != null);
+    try std.testing.expect(Tid.parse("5222222222222") != null);
+    try std.testing.expect(Tid.parse("6222222222222") != null);
+    try std.testing.expect(Tid.parse("7222222222222") != null);
+}
+
+test "all valid chars in non-first position" {
+    // chars 2-7 and a-z are valid after first position
+    try std.testing.expect(Tid.parse("2aaaaaaaaaaaa") != null);
+    try std.testing.expect(Tid.parse("2zzzzzzzzzzzz") != null);
+    try std.testing.expect(Tid.parse("2234567234567") != null);
+}
+
+test "uppercase rejected" {
+    try std.testing.expect(Tid.parse("2AAAAAAAAAAAA") == null);
+    try std.testing.expect(Tid.parse("2AAAAAAAAaaaa") == null);
+}

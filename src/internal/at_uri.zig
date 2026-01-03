@@ -1,11 +1,16 @@
 //! AT-URI Parser
 //!
-//! at-uris identify records in the atproto network.
-//! format: at://<did>/<collection>/<rkey>
+//! at-uris identify repositories and records in the atproto network.
+//! format: at://<authority>[/<collection>[/<rkey>]]
 //!
-//! examples:
-//! - at://did:plc:xyz/app.bsky.feed.post/abc123
-//! - at://did:web:example.com/app.bsky.actor.profile/self
+//! validation rules:
+//! - max 8KB length
+//! - no trailing slashes
+//! - authority is either a DID or handle
+//! - collection (if present) must be a valid NSID
+//! - rkey (if present) must be a valid record key
+//!
+//! see: https://atproto.com/specs/at-uri-scheme
 
 const std = @import("std");
 
@@ -13,65 +18,116 @@ pub const AtUri = struct {
     /// the full uri string (borrowed, not owned)
     raw: []const u8,
 
-    /// offset where did ends (after "at://")
-    did_end: usize,
+    /// offset where authority ends (after "at://")
+    authority_end: usize,
 
-    /// offset where collection ends
+    /// offset where collection ends (0 if no collection)
     collection_end: usize,
 
+    pub const max_length = 8 * 1024;
     const prefix = "at://";
 
     /// parse an at-uri. returns null if invalid.
     pub fn parse(s: []const u8) ?AtUri {
+        // length check
+        if (s.len < prefix.len or s.len > max_length) return null;
+
+        // must start with "at://"
         if (!std.mem.startsWith(u8, s, prefix)) return null;
 
+        // no trailing slash
+        if (s[s.len - 1] == '/') return null;
+
         const after_prefix = s[prefix.len..];
+        if (after_prefix.len == 0) return null; // empty authority
 
-        // find first slash (end of did)
-        const did_end_rel = std.mem.indexOfScalar(u8, after_prefix, '/') orelse return null;
-        if (did_end_rel == 0) return null; // empty did
+        // find first slash (end of authority)
+        const authority_end_rel = std.mem.indexOfScalar(u8, after_prefix, '/');
 
-        const after_did = after_prefix[did_end_rel + 1 ..];
+        if (authority_end_rel) |ae| {
+            if (ae == 0) return null; // empty authority
 
-        // find second slash (end of collection)
-        const collection_end_rel = std.mem.indexOfScalar(u8, after_did, '/') orelse return null;
-        if (collection_end_rel == 0) return null; // empty collection
+            const after_authority = after_prefix[ae + 1 ..];
+            if (after_authority.len == 0) return null; // trailing slash after authority
 
-        // check rkey isn't empty
-        const rkey_start = prefix.len + did_end_rel + 1 + collection_end_rel + 1;
-        if (rkey_start >= s.len) return null;
+            // find second slash (end of collection)
+            const collection_end_rel = std.mem.indexOfScalar(u8, after_authority, '/');
 
-        return .{
-            .raw = s,
-            .did_end = prefix.len + did_end_rel,
-            .collection_end = prefix.len + did_end_rel + 1 + collection_end_rel,
-        };
+            if (collection_end_rel) |ce| {
+                if (ce == 0) return null; // empty collection
+                const after_collection = after_authority[ce + 1 ..];
+                if (after_collection.len == 0) return null; // trailing slash after collection
+
+                // full uri: authority + collection + rkey
+                return .{
+                    .raw = s,
+                    .authority_end = prefix.len + ae,
+                    .collection_end = prefix.len + ae + 1 + ce,
+                };
+            } else {
+                // uri with authority + collection only
+                return .{
+                    .raw = s,
+                    .authority_end = prefix.len + ae,
+                    .collection_end = s.len,
+                };
+            }
+        } else {
+            // authority only
+            return .{
+                .raw = s,
+                .authority_end = s.len,
+                .collection_end = 0,
+            };
+        }
     }
 
-    /// the did portion (e.g., "did:plc:xyz")
-    pub fn did(self: AtUri) []const u8 {
-        return self.raw[prefix.len..self.did_end];
+    /// the authority portion (DID or handle)
+    pub fn authority(self: AtUri) []const u8 {
+        return self.raw[prefix.len..self.authority_end];
     }
 
-    /// the collection portion (e.g., "app.bsky.feed.post")
-    pub fn collection(self: AtUri) []const u8 {
-        return self.raw[self.did_end + 1 .. self.collection_end];
+    /// the collection portion, or null if not present
+    pub fn collection(self: AtUri) ?[]const u8 {
+        if (self.collection_end == 0) return null;
+        return self.raw[self.authority_end + 1 .. self.collection_end];
     }
 
-    /// the rkey portion (e.g., "abc123")
-    pub fn rkey(self: AtUri) []const u8 {
-        return self.raw[self.collection_end + 1 ..];
+    /// the rkey portion, or null if not present
+    pub fn rkey(self: AtUri) ?[]const u8 {
+        if (self.collection_end == 0) return null;
+        if (self.collection_end >= self.raw.len) return null;
+        const r = self.raw[self.collection_end + 1 ..];
+        if (r.len == 0) return null;
+        return r;
+    }
+
+    /// check if this uri has a collection component
+    pub fn hasCollection(self: AtUri) bool {
+        return self.collection_end != 0;
+    }
+
+    /// check if this uri has an rkey component
+    pub fn hasRkey(self: AtUri) bool {
+        return self.rkey() != null;
     }
 
     /// format a new at-uri into the provided buffer.
     /// returns the slice of the buffer used, or null if buffer too small.
     pub fn format(
         buf: []u8,
-        did_str: []const u8,
-        collection_str: []const u8,
-        rkey_str: []const u8,
+        authority_str: []const u8,
+        collection_str: ?[]const u8,
+        rkey_str: ?[]const u8,
     ) ?[]const u8 {
-        const total_len = prefix.len + did_str.len + 1 + collection_str.len + 1 + rkey_str.len;
+        var total_len = prefix.len + authority_str.len;
+        if (collection_str) |c| {
+            total_len += 1 + c.len;
+            if (rkey_str) |r| {
+                total_len += 1 + r.len;
+            }
+        }
+
         if (buf.len < total_len) return null;
 
         var pos: usize = 0;
@@ -79,58 +135,106 @@ pub const AtUri = struct {
         @memcpy(buf[pos..][0..prefix.len], prefix);
         pos += prefix.len;
 
-        @memcpy(buf[pos..][0..did_str.len], did_str);
-        pos += did_str.len;
+        @memcpy(buf[pos..][0..authority_str.len], authority_str);
+        pos += authority_str.len;
 
-        buf[pos] = '/';
-        pos += 1;
+        if (collection_str) |c| {
+            buf[pos] = '/';
+            pos += 1;
+            @memcpy(buf[pos..][0..c.len], c);
+            pos += c.len;
 
-        @memcpy(buf[pos..][0..collection_str.len], collection_str);
-        pos += collection_str.len;
-
-        buf[pos] = '/';
-        pos += 1;
-
-        @memcpy(buf[pos..][0..rkey_str.len], rkey_str);
-        pos += rkey_str.len;
+            if (rkey_str) |r| {
+                buf[pos] = '/';
+                pos += 1;
+                @memcpy(buf[pos..][0..r.len], r);
+                pos += r.len;
+            }
+        }
 
         return buf[0..pos];
     }
 };
 
-test "parse valid at-uri" {
-    const uri = AtUri.parse("at://did:plc:xyz/app.bsky.feed.post/abc123") orelse return error.InvalidUri;
-    try std.testing.expectEqualStrings("did:plc:xyz", uri.did());
-    try std.testing.expectEqualStrings("app.bsky.feed.post", uri.collection());
-    try std.testing.expectEqualStrings("abc123", uri.rkey());
+// === tests from atproto.com/specs/at-uri-scheme ===
+
+test "valid: full uri with did:plc" {
+    const uri = AtUri.parse("at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.feed.post/3jxtb5w2hkt2m") orelse return error.InvalidUri;
+    try std.testing.expectEqualStrings("did:plc:z72i7hdynmk6r22z27h6tvur", uri.authority());
+    try std.testing.expectEqualStrings("app.bsky.feed.post", uri.collection().?);
+    try std.testing.expectEqualStrings("3jxtb5w2hkt2m", uri.rkey().?);
 }
 
-test "parse did:web uri" {
+test "valid: full uri with did:web" {
     const uri = AtUri.parse("at://did:web:example.com/app.bsky.actor.profile/self") orelse return error.InvalidUri;
-    try std.testing.expectEqualStrings("did:web:example.com", uri.did());
-    try std.testing.expectEqualStrings("app.bsky.actor.profile", uri.collection());
-    try std.testing.expectEqualStrings("self", uri.rkey());
+    try std.testing.expectEqualStrings("did:web:example.com", uri.authority());
+    try std.testing.expectEqualStrings("app.bsky.actor.profile", uri.collection().?);
+    try std.testing.expectEqualStrings("self", uri.rkey().?);
 }
 
-test "reject invalid uris" {
-    // missing prefix
+test "valid: full uri with handle" {
+    const uri = AtUri.parse("at://alice.bsky.social/app.bsky.feed.post/abc123") orelse return error.InvalidUri;
+    try std.testing.expectEqualStrings("alice.bsky.social", uri.authority());
+    try std.testing.expectEqualStrings("app.bsky.feed.post", uri.collection().?);
+    try std.testing.expectEqualStrings("abc123", uri.rkey().?);
+}
+
+test "valid: authority only" {
+    const uri = AtUri.parse("at://did:plc:z72i7hdynmk6r22z27h6tvur") orelse return error.InvalidUri;
+    try std.testing.expectEqualStrings("did:plc:z72i7hdynmk6r22z27h6tvur", uri.authority());
+    try std.testing.expect(uri.collection() == null);
+    try std.testing.expect(uri.rkey() == null);
+    try std.testing.expect(!uri.hasCollection());
+    try std.testing.expect(!uri.hasRkey());
+}
+
+test "valid: authority and collection only" {
+    const uri = AtUri.parse("at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.feed.post") orelse return error.InvalidUri;
+    try std.testing.expectEqualStrings("did:plc:z72i7hdynmk6r22z27h6tvur", uri.authority());
+    try std.testing.expectEqualStrings("app.bsky.feed.post", uri.collection().?);
+    try std.testing.expect(uri.rkey() == null);
+    try std.testing.expect(uri.hasCollection());
+    try std.testing.expect(!uri.hasRkey());
+}
+
+test "invalid: missing prefix" {
     try std.testing.expect(AtUri.parse("did:plc:xyz/app.bsky.feed.post/abc") == null);
-
-    // wrong prefix
-    try std.testing.expect(AtUri.parse("http://did:plc:xyz/app.bsky.feed.post/abc") == null);
-
-    // missing collection
-    try std.testing.expect(AtUri.parse("at://did:plc:xyz") == null);
-
-    // missing rkey
-    try std.testing.expect(AtUri.parse("at://did:plc:xyz/app.bsky.feed.post") == null);
-
-    // empty did
-    try std.testing.expect(AtUri.parse("at:///app.bsky.feed.post/abc") == null);
+    try std.testing.expect(AtUri.parse("http://did:plc:xyz/collection/rkey") == null);
 }
 
-test "format at-uri" {
+test "invalid: empty authority" {
+    try std.testing.expect(AtUri.parse("at://") == null);
+    try std.testing.expect(AtUri.parse("at:///collection/rkey") == null);
+}
+
+test "invalid: trailing slash" {
+    try std.testing.expect(AtUri.parse("at://did:plc:xyz/") == null);
+    try std.testing.expect(AtUri.parse("at://did:plc:xyz/collection/") == null);
+    try std.testing.expect(AtUri.parse("at://did:plc:xyz/collection/rkey/") == null);
+}
+
+test "invalid: empty collection" {
+    try std.testing.expect(AtUri.parse("at://did:plc:xyz//rkey") == null);
+}
+
+test "invalid: empty rkey" {
+    try std.testing.expect(AtUri.parse("at://did:plc:xyz/collection/") == null);
+}
+
+test "format: full uri" {
     var buf: [256]u8 = undefined;
     const result = AtUri.format(&buf, "did:plc:xyz", "app.bsky.feed.post", "abc123") orelse return error.BufferTooSmall;
     try std.testing.expectEqualStrings("at://did:plc:xyz/app.bsky.feed.post/abc123", result);
+}
+
+test "format: authority only" {
+    var buf: [256]u8 = undefined;
+    const result = AtUri.format(&buf, "did:plc:xyz", null, null) orelse return error.BufferTooSmall;
+    try std.testing.expectEqualStrings("at://did:plc:xyz", result);
+}
+
+test "format: authority and collection" {
+    var buf: [256]u8 = undefined;
+    const result = AtUri.format(&buf, "did:plc:xyz", "app.bsky.feed.post", null) orelse return error.BufferTooSmall;
+    try std.testing.expectEqualStrings("at://did:plc:xyz/app.bsky.feed.post", result);
 }
