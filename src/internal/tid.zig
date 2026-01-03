@@ -2,10 +2,11 @@
 //!
 //! tids encode a timestamp and clock id in a base32-sortable format.
 //! format: 13 characters using alphabet "234567abcdefghijklmnopqrstuvwxyz"
-//! - first 11 chars: 53-bit timestamp (microseconds since epoch)
-//! - last 2 chars: 10-bit clock identifier
+//! - first char must be 2-7 (high bit 0x40 must be 0)
+//! - remaining chars encode 53-bit timestamp + 10-bit clock id
 //!
 //! the encoding is designed to be lexicographically sortable by time.
+//! see: https://atproto.com/specs/record-key#record-key-type-tid
 
 const std = @import("std");
 
@@ -17,6 +18,9 @@ pub const Tid = struct {
     /// parse a tid string. returns null if invalid.
     pub fn parse(s: []const u8) ?Tid {
         if (s.len != 13) return null;
+
+        // first char high bit (0x40) must be 0, meaning only '2'-'7' allowed
+        if (s[0] & 0x40 != 0) return null;
 
         var result: Tid = undefined;
         for (s, 0..) |c, i| {
@@ -101,6 +105,10 @@ test "reject invalid tid" {
     // invalid chars
     try std.testing.expect(Tid.parse("0000000000000") == null);
     try std.testing.expect(Tid.parse("1111111111111") == null);
+
+    // first char must be 2-7 (high bit 0x40 must be 0)
+    try std.testing.expect(Tid.parse("a222222222222") == null);
+    try std.testing.expect(Tid.parse("z222222222222") == null);
 }
 
 test "roundtrip" {
