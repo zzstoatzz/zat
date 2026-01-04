@@ -94,6 +94,37 @@ const FeedPost = struct {
 const post = try zat.json.extractAt(FeedPost, allocator, value, .{"post"});
 ```
 
+### jwt verification
+
+verify service auth tokens:
+
+```zig
+var jwt = try zat.Jwt.parse(allocator, token_string);
+defer jwt.deinit();
+
+// check claims
+if (jwt.isExpired()) return error.TokenExpired;
+if (!std.mem.eql(u8, jwt.payload.aud, expected_audience)) return error.InvalidAudience;
+
+// verify signature against issuer's public key (from DID document)
+try jwt.verify(public_key_multibase);
+```
+
+supports ES256 (P-256) and ES256K (secp256k1) signing algorithms.
+
+### multibase decoding
+
+decode public keys from DID documents:
+
+```zig
+const key_bytes = try zat.multibase.decode(allocator, "zQ3sh...");
+defer allocator.free(key_bytes);
+
+const parsed = try zat.multicodec.parsePublicKey(key_bytes);
+// parsed.key_type: .secp256k1 or .p256
+// parsed.raw: 33-byte compressed public key
+```
+
 ## specs
 
 validation follows [atproto.com/specs](https://atproto.com/specs/atp).

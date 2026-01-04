@@ -20,3 +20,8 @@ pub const XrpcClient = @import("internal/xrpc.zig").XrpcClient;
 
 // json helpers
 pub const json = @import("internal/json.zig");
+
+// service auth
+pub const Jwt = @import("internal/jwt.zig").Jwt;
+pub const multibase = @import("internal/multibase.zig");
+pub const multicodec = @import("internal/multicodec.zig");
