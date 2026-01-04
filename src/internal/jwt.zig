@@ -201,7 +201,7 @@ fn parsePayload(allocator: std.mem.Allocator, payload_json: []const u8) !Payload
 }
 
 fn verifySecp256k1(message: []const u8, sig_bytes: []const u8, public_key_raw: []const u8) !void {
-    const Scheme = crypto.ecdsa.EcdsaSecp256k1Sha256;
+    const Scheme = crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 
     // parse signature (r || s, 64 bytes)
     if (sig_bytes.len != 64) return error.InvalidSignature;
@@ -216,7 +216,7 @@ fn verifySecp256k1(message: []const u8, sig_bytes: []const u8, public_key_raw: [
 }
 
 fn verifyP256(message: []const u8, sig_bytes: []const u8, public_key_raw: []const u8) !void {
-    const Scheme = crypto.ecdsa.EcdsaP256Sha256;
+    const Scheme = crypto.sign.ecdsa.EcdsaP256Sha256;
 
     // parse signature (r || s, 64 bytes)
     if (sig_bytes.len != 64) return error.InvalidSignature;
