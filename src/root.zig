@@ -14,6 +14,7 @@ pub const AtUri = @import("internal/at_uri.zig").AtUri;
 // did resolution
 pub const DidDocument = @import("internal/did_document.zig").DidDocument;
 pub const DidResolver = @import("internal/did_resolver.zig").DidResolver;
+pub const HandleResolver = @import("internal/handle_resolver.zig").HandleResolver;
 
 // xrpc
 pub const XrpcClient = @import("internal/xrpc.zig").XrpcClient;
