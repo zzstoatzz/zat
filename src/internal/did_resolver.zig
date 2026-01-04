@@ -103,23 +103,23 @@ pub const DidResolver = struct {
 // === tests ===
 
 test "resolve did:plc - integration" {
-    // run with: zig build test -- --test-filter "integration"
-    if (@import("builtin").is_test) {
-        // actually run this to verify it compiles and works
-        var resolver = DidResolver.init(std.testing.allocator);
-        defer resolver.deinit();
+    // use arena for http client internals that may leak
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
 
-        const did = Did.parse("did:plc:z72i7hdynmk6r22z27h6tvur").?;
-        var doc = resolver.resolve(did) catch |err| {
-            // network errors are ok in CI, but compilation must succeed
-            std.debug.print("network error (expected in CI): {}\n", .{err});
-            return;
-        };
-        defer doc.deinit();
+    var resolver = DidResolver.init(arena.allocator());
+    defer resolver.deinit();
 
-        try std.testing.expectEqualStrings("did:plc:z72i7hdynmk6r22z27h6tvur", doc.id);
-        try std.testing.expect(doc.handle() != null);
-    }
+    const did = Did.parse("did:plc:z72i7hdynmk6r22z27h6tvur").?;
+    var doc = resolver.resolve(did) catch |err| {
+        // network errors are ok in CI, but compilation must succeed
+        std.debug.print("network error (expected in CI): {}\n", .{err});
+        return;
+    };
+    defer doc.deinit();
+
+    try std.testing.expectEqualStrings("did:plc:z72i7hdynmk6r22z27h6tvur", doc.id);
+    try std.testing.expect(doc.handle() != null);
 }
 
 test "did:web url construction" {
