@@ -2,6 +2,10 @@
 //!
 //! simplifies navigating nested json structures.
 //! eliminates the verbose nested if-checks.
+//!
+//! two approaches:
+//! - runtime paths: getString(value, "embed.external.uri") - for dynamic paths
+//! - comptime paths: extractAt(T, alloc, value, .{"embed", "external"}) - for static paths with type safety
 
 const std = @import("std");
 
@@ -83,6 +87,37 @@ pub fn getObject(value: std.json.Value, path: []const u8) ?std.json.ObjectMap {
     };
 }
 
+// === comptime path extraction ===
+
+/// extract a typed struct from a nested path
+/// uses comptime tuple for path segments - no runtime string parsing
+/// leverages std.json.parseFromValueLeaky for type-safe extraction
+pub fn extractAt(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+    comptime path: anytype,
+) std.json.ParseFromValueError!T {
+    var current = value;
+    inline for (path) |segment| {
+        current = switch (current) {
+            .object => |obj| obj.get(segment) orelse return error.MissingField,
+            else => return error.UnexpectedToken,
+        };
+    }
+    return std.json.parseFromValueLeaky(T, allocator, current, .{});
+}
+
+/// extract a typed value, returning null if path doesn't exist
+pub fn extractAtOptional(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+    comptime path: anytype,
+) ?T {
+    return extractAt(T, allocator, value, path) catch null;
+}
+
 // === tests ===
 
 test "getPath simple" {
@@ -150,4 +185,88 @@ test "getPath deeply nested real-world example" {
 
     const title = getString(parsed.value, "embed.external.title");
     try std.testing.expectEqualStrings("Tangled", title.?);
+}
+
+// === comptime extraction tests ===
+
+test "extractAt struct" {
+    const json_str =
+        \\{
+        \\  "embed": {
+        \\    "external": {
+        \\      "uri": "https://tangled.sh",
+        \\      "title": "Tangled"
+        \\    }
+        \\  }
+        \\}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json_str, .{});
+    defer parsed.deinit();
+
+    const External = struct {
+        uri: []const u8,
+        title: []const u8,
+    };
+
+    const ext = try extractAt(External, std.testing.allocator, parsed.value, .{ "embed", "external" });
+    try std.testing.expectEqualStrings("https://tangled.sh", ext.uri);
+    try std.testing.expectEqualStrings("Tangled", ext.title);
+}
+
+test "extractAt with optional fields" {
+    const json_str =
+        \\{
+        \\  "user": {
+        \\    "name": "alice",
+        \\    "age": 30
+        \\  }
+        \\}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json_str, .{});
+    defer parsed.deinit();
+
+    const User = struct {
+        name: []const u8,
+        age: i64,
+        bio: ?[]const u8 = null,
+    };
+
+    const user = try extractAt(User, std.testing.allocator, parsed.value, .{"user"});
+    try std.testing.expectEqualStrings("alice", user.name);
+    try std.testing.expectEqual(@as(i64, 30), user.age);
+    try std.testing.expect(user.bio == null);
+}
+
+test "extractAt empty path extracts root" {
+    const json_str =
+        \\{"name": "root", "value": 42}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json_str, .{});
+    defer parsed.deinit();
+
+    const Root = struct {
+        name: []const u8,
+        value: i64,
+    };
+
+    const root = try extractAt(Root, std.testing.allocator, parsed.value, .{});
+    try std.testing.expectEqualStrings("root", root.name);
+    try std.testing.expectEqual(@as(i64, 42), root.value);
+}
+
+test "extractAtOptional returns null on missing path" {
+    const json_str =
+        \\{"exists": {"value": 1}}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json_str, .{});
+    defer parsed.deinit();
+
+    const Thing = struct { value: i64 };
+
+    const exists = extractAtOptional(Thing, std.testing.allocator, parsed.value, .{"exists"});
+    try std.testing.expect(exists != null);
+    try std.testing.expectEqual(@as(i64, 1), exists.?.value);
+
+    const missing = extractAtOptional(Thing, std.testing.allocator, parsed.value, .{"missing"});
+    try std.testing.expect(missing == null);
 }
