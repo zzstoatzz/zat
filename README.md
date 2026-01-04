@@ -5,7 +5,7 @@ zig primitives for AT Protocol.
 ## install
 
 ```bash
-zig fetch --save https://tangled.org/zzstoatzz.io/zat/archive/main
+zig fetch --save https://tangled.sh/zzstoatzz.io/zat/archive/main
 ```
 
 then in `build.zig`:
@@ -17,9 +17,8 @@ exe.root_module.addImport("zat", zat);
 
 ## what's here
 
-### string primitives
-
-parsing and validation for atproto string identifiers:
+<details>
+<summary><strong>string primitives</strong> - parsing and validation for atproto identifiers</summary>
 
 - **Tid** - timestamp identifiers (base32-sortable)
 - **Did** - decentralized identifiers
@@ -38,9 +37,10 @@ if (zat.AtUri.parse(uri_string)) |uri| {
 }
 ```
 
-### did resolution
+</details>
 
-resolve `did:plc` and `did:web` identifiers to their documents:
+<details>
+<summary><strong>did resolution</strong> - resolve did:plc and did:web to documents</summary>
 
 ```zig
 var resolver = zat.DidResolver.init(allocator);
@@ -55,9 +55,10 @@ const pds = doc.pdsEndpoint();         // "https://..."
 const key = doc.signingKey();          // verification method
 ```
 
-### handle resolution
+</details>
 
-resolve handles to DIDs via HTTP well-known:
+<details>
+<summary><strong>handle resolution</strong> - resolve handles to DIDs via HTTP well-known</summary>
 
 ```zig
 var resolver = zat.HandleResolver.init(allocator);
@@ -69,9 +70,10 @@ defer allocator.free(did);
 // did = "did:plc:z72i7hdynmk6r22z27h6tvur"
 ```
 
-### xrpc client
+</details>
 
-call AT Protocol endpoints:
+<details>
+<summary><strong>xrpc client</strong> - call AT Protocol endpoints</summary>
 
 ```zig
 var client = zat.XrpcClient.init(allocator, "https://bsky.social");
@@ -88,9 +90,10 @@ if (response.ok()) {
 }
 ```
 
-### json helpers
+</details>
 
-navigate nested json without verbose if-chains:
+<details>
+<summary><strong>json helpers</strong> - navigate nested json without verbose if-chains</summary>
 
 ```zig
 // runtime paths for one-offs:
@@ -108,9 +111,10 @@ const FeedPost = struct {
 const post = try zat.json.extractAt(FeedPost, allocator, value, .{"post"});
 ```
 
-### jwt verification
+</details>
 
-verify service auth tokens:
+<details>
+<summary><strong>jwt verification</strong> - verify service auth tokens</summary>
 
 ```zig
 var jwt = try zat.Jwt.parse(allocator, token_string);
@@ -126,9 +130,10 @@ try jwt.verify(public_key_multibase);
 
 supports ES256 (P-256) and ES256K (secp256k1) signing algorithms.
 
-### multibase decoding
+</details>
 
-decode public keys from DID documents:
+<details>
+<summary><strong>multibase decoding</strong> - decode public keys from DID documents</summary>
 
 ```zig
 const key_bytes = try zat.multibase.decode(allocator, "zQ3sh...");
@@ -139,6 +144,12 @@ const parsed = try zat.multicodec.parsePublicKey(key_bytes);
 // parsed.raw: 33-byte compressed public key
 ```
 
+</details>
+
 ## specs
 
 validation follows [atproto.com/specs](https://atproto.com/specs/atp).
+
+## license
+
+MIT
