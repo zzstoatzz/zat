@@ -200,15 +200,17 @@ test "extractAt struct" {
         \\  }
         \\}
     ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json_str, .{});
-    defer parsed.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), json_str, .{});
 
     const External = struct {
         uri: []const u8,
         title: []const u8,
     };
 
-    const ext = try extractAt(External, std.testing.allocator, parsed.value, .{ "embed", "external" });
+    const ext = try extractAt(External, arena.allocator(), parsed.value, .{ "embed", "external" });
     try std.testing.expectEqualStrings("https://tangled.sh", ext.uri);
     try std.testing.expectEqualStrings("Tangled", ext.title);
 }
@@ -222,8 +224,10 @@ test "extractAt with optional fields" {
         \\  }
         \\}
     ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json_str, .{});
-    defer parsed.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), json_str, .{});
 
     const User = struct {
         name: []const u8,
@@ -231,7 +235,7 @@ test "extractAt with optional fields" {
         bio: ?[]const u8 = null,
     };
 
-    const user = try extractAt(User, std.testing.allocator, parsed.value, .{"user"});
+    const user = try extractAt(User, arena.allocator(), parsed.value, .{"user"});
     try std.testing.expectEqualStrings("alice", user.name);
     try std.testing.expectEqual(@as(i64, 30), user.age);
     try std.testing.expect(user.bio == null);
@@ -241,15 +245,17 @@ test "extractAt empty path extracts root" {
     const json_str =
         \\{"name": "root", "value": 42}
     ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json_str, .{});
-    defer parsed.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), json_str, .{});
 
     const Root = struct {
         name: []const u8,
         value: i64,
     };
 
-    const root = try extractAt(Root, std.testing.allocator, parsed.value, .{});
+    const root = try extractAt(Root, arena.allocator(), parsed.value, .{});
     try std.testing.expectEqualStrings("root", root.name);
     try std.testing.expectEqual(@as(i64, 42), root.value);
 }
@@ -258,15 +264,17 @@ test "extractAtOptional returns null on missing path" {
     const json_str =
         \\{"exists": {"value": 1}}
     ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json_str, .{});
-    defer parsed.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), json_str, .{});
 
     const Thing = struct { value: i64 };
 
-    const exists = extractAtOptional(Thing, std.testing.allocator, parsed.value, .{"exists"});
+    const exists = extractAtOptional(Thing, arena.allocator(), parsed.value, .{"exists"});
     try std.testing.expect(exists != null);
     try std.testing.expectEqual(@as(i64, 1), exists.?.value);
 
-    const missing = extractAtOptional(Thing, std.testing.allocator, parsed.value, .{"missing"});
+    const missing = extractAtOptional(Thing, arena.allocator(), parsed.value, .{"missing"});
     try std.testing.expect(missing == null);
 }

@@ -152,6 +152,10 @@ pub const Jwt = struct {
 
     pub fn deinit(self: *Jwt) void {
         self.allocator.free(self.signature);
+        self.allocator.free(self.payload.iss);
+        self.allocator.free(self.payload.aud);
+        if (self.payload.jti) |s| self.allocator.free(s);
+        if (self.payload.lxm) |s| self.allocator.free(s);
     }
 };
 
@@ -167,36 +171,51 @@ fn base64UrlDecode(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 }
 
 fn parseHeader(allocator: std.mem.Allocator, header_json: []const u8) !Header {
-    _ = allocator;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, header_json, .{});
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, header_json, .{});
     defer parsed.deinit();
 
     const alg_str = json.getString(parsed.value, "alg") orelse return error.MissingAlgorithm;
     const alg = Algorithm.fromString(alg_str) orelse return error.UnsupportedAlgorithm;
-    const typ = json.getString(parsed.value, "typ") orelse "JWT";
 
     return .{
         .alg = alg,
-        .typ = typ,
+        .typ = "JWT", // static string, no need to dupe
     };
 }
 
 fn parsePayload(allocator: std.mem.Allocator, payload_json: []const u8) !Payload {
-    _ = allocator;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, payload_json, .{});
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
     defer parsed.deinit();
 
-    const iss = json.getString(parsed.value, "iss") orelse return error.MissingIssuer;
-    const aud = json.getString(parsed.value, "aud") orelse return error.MissingAudience;
+    const iss_raw = json.getString(parsed.value, "iss") orelse return error.MissingIssuer;
+    const aud_raw = json.getString(parsed.value, "aud") orelse return error.MissingAudience;
     const exp = json.getInt(parsed.value, "exp") orelse return error.MissingExpiration;
+
+    // dupe strings so they outlive parsed
+    const iss = try allocator.dupe(u8, iss_raw);
+    errdefer allocator.free(iss);
+
+    const aud = try allocator.dupe(u8, aud_raw);
+    errdefer allocator.free(aud);
+
+    const jti: ?[]const u8 = if (json.getString(parsed.value, "jti")) |s|
+        try allocator.dupe(u8, s)
+    else
+        null;
+    errdefer if (jti) |s| allocator.free(s);
+
+    const lxm: ?[]const u8 = if (json.getString(parsed.value, "lxm")) |s|
+        try allocator.dupe(u8, s)
+    else
+        null;
 
     return .{
         .iss = iss,
         .aud = aud,
         .exp = exp,
         .iat = json.getInt(parsed.value, "iat"),
-        .jti = json.getString(parsed.value, "jti"),
-        .lxm = json.getString(parsed.value, "lxm"),
+        .jti = jti,
+        .lxm = lxm,
     };
 }
 
@@ -236,7 +255,7 @@ test "parse jwt structure" {
     // a minimal valid JWT structure (signature won't verify, just testing parsing)
     // header: {"alg":"ES256K","typ":"JWT"}
     // payload: {"iss":"did:plc:test","aud":"did:plc:service","exp":9999999999}
-    const token = "eyJhbGciOiJFUzI1NksiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJkaWQ6cGxjOnRlc3QiLCJhdWQiOiJkaWQ6cGxjOnNlcnZpY2UiLCJleHAiOjk5OTk5OTk5OTl9.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const token = "eyJhbGciOiJFUzI1NksiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJkaWQ6cGxjOnRlc3QiLCJhdWQiOiJkaWQ6cGxjOnNlcnZpY2UiLCJleHAiOjk5OTk5OTk5OTl9.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     var jwt = try Jwt.parse(std.testing.allocator, token);
     defer jwt.deinit();
