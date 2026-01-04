@@ -31,6 +31,7 @@ pub const DidResolver = struct {
         return switch (did.method()) {
             .plc => try self.resolvePlc(did),
             .web => try self.resolveWeb(did),
+            .other => error.UnsupportedDidMethod,
         };
     }
 
