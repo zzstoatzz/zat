@@ -272,3 +272,61 @@ test "reject invalid jwt format" {
     try std.testing.expectError(error.InvalidJwt, Jwt.parse(std.testing.allocator, "two.parts"));
     try std.testing.expectError(error.InvalidJwt, Jwt.parse(std.testing.allocator, "too.many.parts.here"));
 }
+
+test "verify ES256K signature - official fixture" {
+    // test vector from bluesky-social/indigo atproto/auth/jwt_test.go
+    // pubkey: did:key:zQ3shscXNYZQZSPwegiv7uQZZV5kzATLBRtgJhs7uRY7pfSk4
+    // iss: did:example:iss, aud: did:example:aud, exp: 1713571012
+    const token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NksifQ.eyJpc3MiOiJkaWQ6ZXhhbXBsZTppc3MiLCJhdWQiOiJkaWQ6ZXhhbXBsZTphdWQiLCJleHAiOjE3MTM1NzEwMTJ9.J_In_PQCMjygeeoIKyjybORD89ZnEy1bZTd--sdq_78qv3KCO9181ZAh-2Pl0qlXZjfUlxgIa6wiak2NtsT98g";
+
+    // extract multibase key from did:key (strip "did:key:" prefix)
+    const did_key = "did:key:zQ3shscXNYZQZSPwegiv7uQZZV5kzATLBRtgJhs7uRY7pfSk4";
+    const multibase_key = did_key["did:key:".len..];
+
+    var jwt = try Jwt.parse(std.testing.allocator, token);
+    defer jwt.deinit();
+
+    // verify claims
+    try std.testing.expectEqual(Algorithm.ES256K, jwt.header.alg);
+    try std.testing.expectEqualStrings("did:example:iss", jwt.payload.iss);
+    try std.testing.expectEqualStrings("did:example:aud", jwt.payload.aud);
+
+    // verify signature
+    try jwt.verify(multibase_key);
+}
+
+test "verify ES256 signature - official fixture" {
+    // test vector from bluesky-social/indigo atproto/auth/jwt_test.go
+    // pubkey: did:key:zDnaeXRDKRCEUoYxi8ZJS2pDsgfxUh3pZiu3SES9nbY4DoART
+    // iss: did:example:iss, aud: did:example:aud, exp: 1713571554
+    const token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9.eyJpc3MiOiJkaWQ6ZXhhbXBsZTppc3MiLCJhdWQiOiJkaWQ6ZXhhbXBsZTphdWQiLCJleHAiOjE3MTM1NzE1NTR9.FFRLm7SGbDUp6cL0WoCs0L5oqNkjCXB963TqbgI-KxIjbiqMQATVCalcMJx17JGTjMmfVHJP6Op_V4Z0TTjqog";
+
+    // extract multibase key from did:key
+    const did_key = "did:key:zDnaeXRDKRCEUoYxi8ZJS2pDsgfxUh3pZiu3SES9nbY4DoART";
+    const multibase_key = did_key["did:key:".len..];
+
+    var jwt = try Jwt.parse(std.testing.allocator, token);
+    defer jwt.deinit();
+
+    // verify claims
+    try std.testing.expectEqual(Algorithm.ES256, jwt.header.alg);
+    try std.testing.expectEqualStrings("did:example:iss", jwt.payload.iss);
+    try std.testing.expectEqualStrings("did:example:aud", jwt.payload.aud);
+
+    // verify signature
+    try jwt.verify(multibase_key);
+}
+
+test "reject signature with wrong key" {
+    // ES256K token
+    const token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NksifQ.eyJpc3MiOiJkaWQ6ZXhhbXBsZTppc3MiLCJhdWQiOiJkaWQ6ZXhhbXBsZTphdWQiLCJleHAiOjE3MTM1NzEwMTJ9.J_In_PQCMjygeeoIKyjybORD89ZnEy1bZTd--sdq_78qv3KCO9181ZAh-2Pl0qlXZjfUlxgIa6wiak2NtsT98g";
+
+    // different ES256K key (second fixture from indigo)
+    const wrong_key = "zQ3shqKrpHzQ5HDfhgcYMWaFcpBK3SS39wZLdTjA5GeakX8G5";
+
+    var jwt = try Jwt.parse(std.testing.allocator, token);
+    defer jwt.deinit();
+
+    // should fail verification with wrong key
+    try std.testing.expectError(error.SignatureVerificationFailed, jwt.verify(wrong_key));
+}
