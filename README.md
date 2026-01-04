@@ -1,6 +1,6 @@
 # zat
 
-zig primitives for AT Protocol string formats.
+zig primitives for AT Protocol.
 
 ## install
 
@@ -21,6 +21,8 @@ exe.root_module.addImport("zat", zat);
 
 ## what's here
 
+### string primitives
+
 parsing and validation for atproto string identifiers:
 
 - **Tid** - timestamp identifiers (base32-sortable)
@@ -30,8 +32,6 @@ parsing and validation for atproto string identifiers:
 - **Rkey** - record keys
 - **AtUri** - `at://` URIs
 
-all types follow a common pattern: `parse()` returns an optional, accessors extract components.
-
 ```zig
 const zat = @import("zat");
 
@@ -40,6 +40,53 @@ if (zat.AtUri.parse(uri_string)) |uri| {
     const collection = uri.collection();
     const rkey = uri.rkey();
 }
+```
+
+### did resolution
+
+resolve `did:plc` and `did:web` identifiers to their documents:
+
+```zig
+var resolver = zat.DidResolver.init(allocator);
+defer resolver.deinit();
+
+const did = zat.Did.parse("did:plc:z72i7hdynmk6r22z27h6tvur").?;
+var doc = try resolver.resolve(did);
+defer doc.deinit();
+
+const handle = doc.handle();           // "jay.bsky.social"
+const pds = doc.pdsEndpoint();         // "https://..."
+const key = doc.signingKey();          // verification method
+```
+
+### xrpc client
+
+call AT Protocol endpoints:
+
+```zig
+var client = zat.XrpcClient.init(allocator, "https://bsky.social");
+defer client.deinit();
+
+const nsid = zat.Nsid.parse("app.bsky.actor.getProfile").?;
+var response = try client.query(nsid, params);
+defer response.deinit();
+
+if (response.ok()) {
+    var json = try response.json();
+    defer json.deinit();
+    // use json.value
+}
+```
+
+### json helpers
+
+navigate nested json without verbose if-chains:
+
+```zig
+// instead of 6 nested if-checks:
+const uri = zat.json.getString(value, "embed.external.uri");
+const items = zat.json.getArray(value, "posts");
+const count = zat.json.getInt(value, "meta.count");
 ```
 
 ## specs
