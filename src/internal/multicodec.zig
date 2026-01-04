@@ -23,7 +23,6 @@ pub const PublicKey = struct {
 /// multicodec prefixes (unsigned varint encoding)
 /// secp256k1-pub: 0xe7 = 231, varint encoded as 0xe7 0x01 (2 bytes)
 /// p256-pub: 0x1200 = 4608, varint encoded as 0x80 0x24 (2 bytes)
-
 /// parse a multicodec-prefixed public key
 /// returns the key type and a slice pointing to the raw key bytes
 pub fn parsePublicKey(data: []const u8) !PublicKey {
