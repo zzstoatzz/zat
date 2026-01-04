@@ -79,10 +79,19 @@ if (response.ok()) {
 navigate nested json without verbose if-chains:
 
 ```zig
-// instead of 6 nested if-checks:
+// runtime paths for one-offs:
 const uri = zat.json.getString(value, "embed.external.uri");
-const items = zat.json.getArray(value, "posts");
 const count = zat.json.getInt(value, "meta.count");
+
+// comptime extraction for complex structures:
+const FeedPost = struct {
+    uri: []const u8,
+    cid: []const u8,
+    record: struct {
+        text: []const u8 = "",
+    },
+};
+const post = try zat.json.extractAt(FeedPost, allocator, value, .{"post"});
 ```
 
 ## specs
