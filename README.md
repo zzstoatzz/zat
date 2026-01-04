@@ -55,6 +55,20 @@ const pds = doc.pdsEndpoint();         // "https://..."
 const key = doc.signingKey();          // verification method
 ```
 
+### handle resolution
+
+resolve handles to DIDs via HTTP well-known:
+
+```zig
+var resolver = zat.HandleResolver.init(allocator);
+defer resolver.deinit();
+
+const handle = zat.Handle.parse("jay.bsky.social").?;
+const did = try resolver.resolve(handle);
+defer allocator.free(did);
+// did = "did:plc:z72i7hdynmk6r22z27h6tvur"
+```
+
 ### xrpc client
 
 call AT Protocol endpoints:
