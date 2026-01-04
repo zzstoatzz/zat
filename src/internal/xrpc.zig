@@ -86,7 +86,10 @@ pub const XrpcClient = struct {
         defer aw.deinit();
 
         // build extra headers for auth
-        var extra_headers: std.http.Client.Request.Headers = .{};
+        // disable gzip to work around deflate decompressor panic on x86_64-linux
+        var extra_headers: std.http.Client.Request.Headers = .{
+            .accept_encoding = .{ .override = "identity" },
+        };
         var auth_header_buf: [256]u8 = undefined;
         if (self.access_token) |token| {
             const auth_value = try std.fmt.bufPrint(&auth_header_buf, "Bearer {s}", .{token});
@@ -159,3 +162,4 @@ test "build url with params" {
     try std.testing.expect(std.mem.startsWith(u8, url, "https://bsky.social/xrpc/app.bsky.actor.getProfile?"));
     try std.testing.expect(std.mem.indexOf(u8, url, "actor=did%3Aplc%3Atest123") != null);
 }
+
