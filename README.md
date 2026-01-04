@@ -31,7 +31,7 @@ all types follow a common pattern: `parse()` returns an optional, accessors extr
 ```zig
 const zat = @import("zat");
 
-if (zat.internal.AtUri.parse(uri_string)) |uri| {
+if (zat.AtUri.parse(uri_string)) |uri| {
     const authority = uri.authority();
     const collection = uri.collection();
     const rkey = uri.rkey();

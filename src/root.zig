@@ -1,42 +1,22 @@
-//! zat - zig atproto primitives (alpha)
+//! zat - zig atproto primitives
 //!
-//! low-level building blocks for atproto applications.
-//! not a full sdk - just the pieces everyone reimplements.
-//!
-//! ## stability
-//!
-//! this is alpha software (0.0.1-alpha). the public API is minimal by design.
-//! new features start in `internal` and get promoted here when stable.
-//!
-//! ## public api
-//!
-//! currently empty - everything is still in internal while we iterate.
-//!
-//! ## internal api
-//!
-//! for bleeding-edge features, use the internal module directly:
-//!
-//! ```zig
-//! const zat = @import("zat");
-//!
-//! // internal APIs - subject to change
-//! const tid = zat.internal.Tid.parse("...") orelse return error.InvalidTid;
-//! const uri = zat.internal.AtUri.parse("at://did:plc:xyz/collection/rkey") orelse return error.InvalidUri;
-//! const did = zat.internal.Did.parse("did:plc:xyz") orelse return error.InvalidDid;
-//! ```
-//!
-//! when these stabilize, they'll be promoted to `zat.Tid`, `zat.AtUri`, etc.
+//! parsing and validation for AT Protocol string formats.
 
-/// experimental and in-progress APIs.
-/// everything here is subject to change without notice.
-pub const internal = @import("internal.zig");
+// identifiers
+pub const Tid = @import("internal/tid.zig").Tid;
+pub const Did = @import("internal/did.zig").Did;
+pub const Handle = @import("internal/handle.zig").Handle;
+pub const Nsid = @import("internal/nsid.zig").Nsid;
+pub const Rkey = @import("internal/rkey.zig").Rkey;
 
-// --- stable public API ---
-// (promoted from internal when ready)
-//
-// example of promotion:
-// pub const Tid = internal.Tid;
+// uris
+pub const AtUri = @import("internal/at_uri.zig").AtUri;
 
 test {
-    _ = internal;
+    _ = @import("internal/tid.zig");
+    _ = @import("internal/did.zig");
+    _ = @import("internal/handle.zig");
+    _ = @import("internal/nsid.zig");
+    _ = @import("internal/rkey.zig");
+    _ = @import("internal/at_uri.zig");
 }
