@@ -18,7 +18,7 @@ pub const DidResolver = struct {
     pub fn init(allocator: std.mem.Allocator) DidResolver {
         return .{
             .allocator = allocator,
-            .http_client = std.http.Client{ .allocator = allocator },
+            .http_client = .{ .allocator = allocator },
         };
     }
 
@@ -51,32 +51,32 @@ pub const DidResolver = struct {
         const domain_and_path = did.raw["did:web:".len..];
 
         // decode percent-encoded colons in path
-        var url_buf = std.ArrayList(u8).init(self.allocator);
-        defer url_buf.deinit();
+        var url_buf: std.ArrayList(u8) = .empty;
+        defer url_buf.deinit(self.allocator);
 
-        try url_buf.appendSlice("https://");
+        try url_buf.appendSlice(self.allocator, "https://");
 
         var first_segment = true;
         var it = std.mem.splitScalar(u8, domain_and_path, ':');
         while (it.next()) |segment| {
             if (first_segment) {
                 // first segment is the domain
-                try url_buf.appendSlice(segment);
+                try url_buf.appendSlice(self.allocator, segment);
                 first_segment = false;
             } else {
                 // subsequent segments are path components
-                try url_buf.append('/');
-                try url_buf.appendSlice(segment);
+                try url_buf.append(self.allocator, '/');
+                try url_buf.appendSlice(self.allocator, segment);
             }
         }
 
         // add .well-known/did.json or /did.json
         if (std.mem.indexOf(u8, domain_and_path, ":") == null) {
             // no path, use .well-known
-            try url_buf.appendSlice("/.well-known/did.json");
+            try url_buf.appendSlice(self.allocator, "/.well-known/did.json");
         } else {
             // has path, append did.json
-            try url_buf.appendSlice("/did.json");
+            try url_buf.appendSlice(self.allocator, "/did.json");
         }
 
         return try self.fetchDidDocument(url_buf.items);
@@ -84,33 +84,19 @@ pub const DidResolver = struct {
 
     /// fetch and parse a did document from url
     fn fetchDidDocument(self: *DidResolver, url: []const u8) !DidDocument {
-        const uri = try std.Uri.parse(url);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
 
-        var header_buf: [4096]u8 = undefined;
-        var req = try self.http_client.open(.GET, uri, .{
-            .server_header_buffer = &header_buf,
-        });
-        defer req.deinit();
+        const result = self.http_client.fetch(.{
+            .location = .{ .url = url },
+            .response_writer = &aw.writer,
+        }) catch return error.DidResolutionFailed;
 
-        try req.send();
-        try req.wait();
-
-        if (req.status != .ok) {
+        if (result.status != .ok) {
             return error.DidResolutionFailed;
         }
 
-        // read response body
-        var body = std.ArrayList(u8).init(self.allocator);
-        defer body.deinit();
-
-        var buf: [4096]u8 = undefined;
-        while (true) {
-            const n = try req.reader().read(&buf);
-            if (n == 0) break;
-            try body.appendSlice(buf[0..n]);
-        }
-
-        return try DidDocument.parse(self.allocator, body.items);
+        return try DidDocument.parse(self.allocator, aw.toArrayList().items);
     }
 };
 

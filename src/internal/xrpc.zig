@@ -21,7 +21,7 @@ pub const XrpcClient = struct {
     pub fn init(allocator: std.mem.Allocator, host: []const u8) XrpcClient {
         return .{
             .allocator = allocator,
-            .http_client = std.http.Client{ .allocator = allocator },
+            .http_client = .{ .allocator = allocator },
             .host = host,
         };
     }
@@ -40,7 +40,7 @@ pub const XrpcClient = struct {
         const url = try self.buildUrl(nsid, params);
         defer self.allocator.free(url);
 
-        return try self.doRequest(.GET, url, null);
+        return try self.doRequest(url, null);
     }
 
     /// call a procedure method (POST)
@@ -48,77 +48,63 @@ pub const XrpcClient = struct {
         const url = try self.buildUrl(nsid, null);
         defer self.allocator.free(url);
 
-        return try self.doRequest(.POST, url, body);
+        return try self.doRequest(url, body);
     }
 
     fn buildUrl(self: *XrpcClient, nsid: Nsid, params: ?std.StringHashMap([]const u8)) ![]u8 {
-        var url = std.ArrayList(u8).init(self.allocator);
-        errdefer url.deinit();
+        var url: std.ArrayList(u8) = .empty;
+        errdefer url.deinit(self.allocator);
 
-        try url.appendSlice(self.host);
-        try url.appendSlice("/xrpc/");
-        try url.appendSlice(nsid.raw);
+        try url.appendSlice(self.allocator, self.host);
+        try url.appendSlice(self.allocator, "/xrpc/");
+        try url.appendSlice(self.allocator, nsid.raw);
 
         if (params) |p| {
             var first = true;
             var it = p.iterator();
             while (it.next()) |entry| {
-                try url.append(if (first) '?' else '&');
+                try url.append(self.allocator, if (first) '?' else '&');
                 first = false;
-                try url.appendSlice(entry.key_ptr.*);
-                try url.append('=');
+                try url.appendSlice(self.allocator, entry.key_ptr.*);
+                try url.append(self.allocator, '=');
                 // url encode value
                 for (entry.value_ptr.*) |c| {
                     if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
-                        try url.append(c);
+                        try url.append(self.allocator, c);
                     } else {
-                        try url.writer().print("%{X:0>2}", .{c});
+                        try url.print(self.allocator, "%{X:0>2}", .{c});
                     }
                 }
             }
         }
 
-        return try url.toOwnedSlice();
+        return try url.toOwnedSlice(self.allocator);
     }
 
-    fn doRequest(self: *XrpcClient, method: std.http.Method, url: []const u8, body: ?[]const u8) !Response {
-        const uri = try std.Uri.parse(url);
+    fn doRequest(self: *XrpcClient, url: []const u8, body: ?[]const u8) !Response {
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer aw.deinit();
 
-        var header_buf: [8192]u8 = undefined;
-        var req = try self.http_client.open(method, uri, .{
-            .server_header_buffer = &header_buf,
-            .extra_headers = if (self.access_token) |token| &.{
-                .{ .name = "Authorization", .value = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{token}) },
-            } else &.{},
-        });
-        defer req.deinit();
-
-        req.transfer_encoding = if (body) |b| .{ .content_length = b.len } else .none;
-
-        try req.send();
-
-        if (body) |b| {
-            try req.writer().writeAll(b);
-            try req.finish();
+        // build extra headers for auth
+        var extra_headers: std.http.Client.Request.Headers = .{};
+        var auth_header_buf: [256]u8 = undefined;
+        if (self.access_token) |token| {
+            const auth_value = try std.fmt.bufPrint(&auth_header_buf, "Bearer {s}", .{token});
+            extra_headers.authorization = .{ .override = auth_value };
         }
 
-        try req.wait();
-
-        // read response body
-        var response_body = std.ArrayList(u8).init(self.allocator);
-        errdefer response_body.deinit();
-
-        var buf: [4096]u8 = undefined;
-        while (true) {
-            const n = try req.reader().read(&buf);
-            if (n == 0) break;
-            try response_body.appendSlice(buf[0..n]);
-        }
+        const result = self.http_client.fetch(.{
+            .location = .{ .url = url },
+            .response_writer = &aw.writer,
+            .method = if (body != null) .POST else .GET,
+            .payload = body,
+            .headers = extra_headers,
+        }) catch return error.RequestFailed;
 
         return .{
             .allocator = self.allocator,
-            .status = req.status,
-            .body = try response_body.toOwnedSlice(),
+            .status = result.status,
+            .body = try aw.toArrayList().toOwnedSlice(self.allocator),
         };
     }
 

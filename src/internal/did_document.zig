@@ -85,10 +85,10 @@ pub const DidDocument = struct {
         errdefer allocator.free(id);
 
         // parse alsoKnownAs -> handles
-        var handles = std.ArrayList([]const u8).init(allocator);
+        var handles: std.ArrayList([]const u8) = .empty;
         errdefer {
             for (handles.items) |h| allocator.free(h);
-            handles.deinit();
+            handles.deinit(allocator);
         }
 
         if (obj.get("alsoKnownAs")) |aka| {
@@ -101,14 +101,14 @@ pub const DidDocument = struct {
                             s[5..]
                         else
                             s;
-                        try handles.append(try allocator.dupe(u8, h));
+                        try handles.append(allocator, try allocator.dupe(u8, h));
                     }
                 }
             }
         }
 
         // parse verificationMethod
-        var vms = std.ArrayList(VerificationMethod).init(allocator);
+        var vms: std.ArrayList(VerificationMethod) = .empty;
         errdefer {
             for (vms.items) |vm| {
                 allocator.free(vm.id);
@@ -116,7 +116,7 @@ pub const DidDocument = struct {
                 allocator.free(vm.controller);
                 allocator.free(vm.public_key_multibase);
             }
-            vms.deinit();
+            vms.deinit(allocator);
         }
 
         if (obj.get("verificationMethod")) |vm_arr| {
@@ -130,21 +130,21 @@ pub const DidDocument = struct {
                             .controller = try allocator.dupe(u8, getStr(vm_obj, "controller") orelse ""),
                             .public_key_multibase = try allocator.dupe(u8, getStr(vm_obj, "publicKeyMultibase") orelse ""),
                         };
-                        try vms.append(vm);
+                        try vms.append(allocator, vm);
                     }
                 }
             }
         }
 
         // parse service
-        var svcs = std.ArrayList(Service).init(allocator);
+        var svcs: std.ArrayList(Service) = .empty;
         errdefer {
             for (svcs.items) |svc| {
                 allocator.free(svc.id);
                 allocator.free(svc.type);
                 allocator.free(svc.service_endpoint);
             }
-            svcs.deinit();
+            svcs.deinit(allocator);
         }
 
         if (obj.get("service")) |svc_arr| {
@@ -157,7 +157,7 @@ pub const DidDocument = struct {
                             .type = try allocator.dupe(u8, getStr(svc_obj, "type") orelse ""),
                             .service_endpoint = try allocator.dupe(u8, getStr(svc_obj, "serviceEndpoint") orelse ""),
                         };
-                        try svcs.append(svc);
+                        try svcs.append(allocator, svc);
                     }
                 }
             }
@@ -166,9 +166,9 @@ pub const DidDocument = struct {
         return .{
             .allocator = allocator,
             .id = id,
-            .handles = try handles.toOwnedSlice(),
-            .verification_methods = try vms.toOwnedSlice(),
-            .services = try svcs.toOwnedSlice(),
+            .handles = try handles.toOwnedSlice(allocator),
+            .verification_methods = try vms.toOwnedSlice(allocator),
+            .services = try svcs.toOwnedSlice(allocator),
         };
     }
 
