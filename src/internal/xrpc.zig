@@ -83,7 +83,7 @@ pub const XrpcClient = struct {
 
     fn doRequest(self: *XrpcClient, url: []const u8, body: ?[]const u8) !Response {
         var aw: std.Io.Writer.Allocating = .init(self.allocator);
-        errdefer aw.deinit();
+        defer aw.deinit();
 
         // build extra headers for auth
         var extra_headers: std.http.Client.Request.Headers = .{};
@@ -101,10 +101,12 @@ pub const XrpcClient = struct {
             .headers = extra_headers,
         }) catch return error.RequestFailed;
 
+        const response_body = aw.toArrayList().items;
+
         return .{
             .allocator = self.allocator,
             .status = result.status,
-            .body = try aw.toArrayList().toOwnedSlice(self.allocator),
+            .body = try self.allocator.dupe(u8, response_body),
         };
     }
 

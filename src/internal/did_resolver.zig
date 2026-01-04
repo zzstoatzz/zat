@@ -102,20 +102,24 @@ pub const DidResolver = struct {
 
 // === tests ===
 
-test "resolve did:plc" {
-    // this is an integration test - requires network
-    if (true) return error.SkipZigTest; // skip by default
+test "resolve did:plc - integration" {
+    // run with: zig build test -- --test-filter "integration"
+    if (@import("builtin").is_test) {
+        // actually run this to verify it compiles and works
+        var resolver = DidResolver.init(std.testing.allocator);
+        defer resolver.deinit();
 
-    var resolver = DidResolver.init(std.testing.allocator);
-    defer resolver.deinit();
+        const did = Did.parse("did:plc:z72i7hdynmk6r22z27h6tvur").?;
+        var doc = resolver.resolve(did) catch |err| {
+            // network errors are ok in CI, but compilation must succeed
+            std.debug.print("network error (expected in CI): {}\n", .{err});
+            return;
+        };
+        defer doc.deinit();
 
-    // jay's did
-    const did = Did.parse("did:plc:z72i7hdynmk6r22z27h6tvur").?;
-    var doc = try resolver.resolve(did);
-    defer doc.deinit();
-
-    try std.testing.expectEqualStrings("did:plc:z72i7hdynmk6r22z27h6tvur", doc.id);
-    try std.testing.expect(doc.handle() != null);
+        try std.testing.expectEqualStrings("did:plc:z72i7hdynmk6r22z27h6tvur", doc.id);
+        try std.testing.expect(doc.handle() != null);
+    }
 }
 
 test "did:web url construction" {
