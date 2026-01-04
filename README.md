@@ -5,6 +5,10 @@ zig primitives for AT Protocol string formats.
 ## install
 
 ```bash
+# from tangled
+zig fetch --save https://tangled.org/zzstoatzz.io/zat/archive/main
+
+# or from github
 zig fetch --save https://github.com/zzstoatzz/zat/archive/main.tar.gz
 ```
 
