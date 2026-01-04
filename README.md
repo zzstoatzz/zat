@@ -40,4 +40,4 @@ if (zat.internal.AtUri.parse(uri_string)) |uri| {
 
 ## specs
 
-validation follows [atproto.com/specs](https://atproto.com/specs).
+validation follows [atproto.com/specs](https://atproto.com/specs/atp).
