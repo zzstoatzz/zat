@@ -85,8 +85,8 @@ pub const XrpcClient = struct {
         var aw: std.Io.Writer.Allocating = .init(self.allocator);
         defer aw.deinit();
 
-        // build extra headers for auth
-        // disable gzip to work around deflate decompressor panic on x86_64-linux
+        // disable gzip: zig stdlib flate.Decompress panics on certain streams
+        // https://github.com/ziglang/zig/issues/25021
         var extra_headers: std.http.Client.Request.Headers = .{
             .accept_encoding = .{ .override = "identity" },
         };
