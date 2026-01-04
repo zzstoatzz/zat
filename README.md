@@ -50,7 +50,7 @@ const did = zat.Did.parse("did:plc:z72i7hdynmk6r22z27h6tvur").?;
 var doc = try resolver.resolve(did);
 defer doc.deinit();
 
-const handle = doc.handle();           // "jay.bsky.social"
+const handle = doc.handle();           // "bsky.app"
 const pds = doc.pdsEndpoint();         // "https://..."
 const key = doc.signingKey();          // verification method
 ```
@@ -64,7 +64,7 @@ const key = doc.signingKey();          // verification method
 var resolver = zat.HandleResolver.init(allocator);
 defer resolver.deinit();
 
-const handle = zat.Handle.parse("jay.bsky.social").?;
+const handle = zat.Handle.parse("bsky.app").?;
 const did = try resolver.resolve(handle);
 defer allocator.free(did);
 // did = "did:plc:z72i7hdynmk6r22z27h6tvur"
