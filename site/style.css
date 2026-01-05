@@ -77,6 +77,20 @@ a:hover {
   text-decoration: none;
 }
 
+.header-link {
+  margin-left: auto;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--text);
+  opacity: 0.9;
+}
+.header-link:hover {
+  background: color-mix(in srgb, var(--codebg) 70%, transparent);
+  text-decoration: none;
+  opacity: 1;
+}
+
 .layout {
   display: grid;
   grid-template-columns: 280px 1fr;
