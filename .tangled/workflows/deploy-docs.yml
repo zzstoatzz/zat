@@ -11,7 +11,8 @@ dependencies:
     - curl
 
 environment:
-  WISP_HANDLE: "zat.dev"
+  # Use DID directly to avoid handle-resolution issues in CI.
+  WISP_DID: "did:plc:mkqt76xvfgxuemlwlx6ruc3w"
   WISP_SITE_NAME: "docs"
 
 steps:
@@ -24,4 +25,4 @@ steps:
       test -n "$WISP_APP_PASSWORD"
       curl -sSL https://sites.wisp.place/nekomimi.pet/wisp-cli-binaries/wisp-cli-x86_64-linux -o wisp-cli
       chmod +x wisp-cli
-      ./wisp-cli deploy "$WISP_HANDLE" --path ./site-out --site "$WISP_SITE_NAME" --password "$WISP_APP_PASSWORD"
+      ./wisp-cli deploy "$WISP_DID" --path ./site-out --site "$WISP_SITE_NAME" --password "$WISP_APP_PASSWORD"
