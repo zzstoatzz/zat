@@ -8,12 +8,16 @@ import {
   access,
 } from "node:fs/promises";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 const repoRoot = path.resolve(new URL("..", import.meta.url).pathname);
 const docsDir = path.join(repoRoot, "docs");
 const siteSrcDir = path.join(repoRoot, "site");
 const outDir = path.join(repoRoot, "site-out");
 const outDocsDir = path.join(outDir, "docs");
+
+const execFileAsync = promisify(execFile);
 
 async function exists(filePath) {
   try {
@@ -53,12 +57,46 @@ function titleFromMarkdown(md, fallback) {
   return fallback.replace(/\.md$/i, "");
 }
 
+async function getBuildId() {
+  try {
+    const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+      cwd: repoRoot,
+    });
+    const full = String(stdout || "").trim();
+    if (full) return full.slice(0, 12);
+  } catch {
+    // ignore
+  }
+  return String(Date.now());
+}
+
 async function main() {
   await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
 
   // Copy static site shell
   await cp(siteSrcDir, outDir, { recursive: true });
+
+  // Cache-bust immutable assets on Wisp by appending a per-commit query string.
+  const buildId = await getBuildId();
+  const outIndex = path.join(outDir, "index.html");
+  if (await exists(outIndex)) {
+    let html = await readFile(outIndex, "utf8");
+    html = html.replaceAll('href="./style.css"', `href="./style.css?v=${buildId}"`);
+    html = html.replaceAll(
+      'src="./vendor/marked.min.js"',
+      `src="./vendor/marked.min.js?v=${buildId}"`,
+    );
+    html = html.replaceAll(
+      'src="./app.js"',
+      `src="./app.js?v=${buildId}"`,
+    );
+    html = html.replaceAll(
+      'href="./favicon.svg"',
+      `href="./favicon.svg?v=${buildId}"`,
+    );
+    await writeFile(outIndex, html, "utf8");
+  }
 
   // Copy docs
   await mkdir(outDocsDir, { recursive: true });

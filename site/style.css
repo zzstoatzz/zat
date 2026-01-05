@@ -163,11 +163,10 @@ a:hover {
 
 .site-footer {
   display: flex;
-  justify-content: flex-end;
+  justify-content: center;
   padding: 12px 16px;
   border-top: 1px solid var(--border);
-  background: color-mix(in srgb, var(--panel) 92%, transparent);
-  backdrop-filter: blur(10px);
+  background: var(--panel);
 }
 
 .footer-link {

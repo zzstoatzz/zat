@@ -1,6 +1,14 @@
 const navEl = document.getElementById("nav");
 const contentEl = document.getElementById("content");
 
+const buildId = new URL(import.meta.url).searchParams.get("v") || "";
+
+function withBuild(url) {
+  if (!buildId) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}v=${encodeURIComponent(buildId)}`;
+}
+
 function escapeHtml(text) {
   return text
     .replaceAll("&", "&amp;")
@@ -30,13 +38,13 @@ function setSelectedPath(docPath) {
 }
 
 async function fetchJson(path) {
-  const res = await fetch(path, { cache: "no-cache" });
+  const res = await fetch(withBuild(path), { cache: "no-store" });
   if (!res.ok) throw new Error(`Failed to fetch ${path}: ${res.status}`);
   return res.json();
 }
 
 async function fetchText(path) {
-  const res = await fetch(path, { cache: "no-cache" });
+  const res = await fetch(withBuild(path), { cache: "no-store" });
   if (!res.ok) throw new Error(`Failed to fetch ${path}: ${res.status}`);
   return res.text();
 }
