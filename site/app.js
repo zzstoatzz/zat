@@ -1,0 +1,145 @@
+const navEl = document.getElementById("nav");
+const contentEl = document.getElementById("content");
+const searchEl = document.getElementById("search");
+
+function escapeHtml(text) {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function normalizeDocPath(docPath) {
+  let p = String(docPath || "").trim();
+  p = p.replaceAll("\\", "/");
+  p = p.replace(/^\/+/, "");
+  p = p.replace(/\.\.\//g, "");
+  if (!p.endsWith(".md")) p += ".md";
+  return p;
+}
+
+function getSelectedPath() {
+  const hash = (location.hash || "").replace(/^#/, "");
+  if (!hash) return null;
+  return normalizeDocPath(hash);
+}
+
+function setSelectedPath(docPath) {
+  location.hash = normalizeDocPath(docPath);
+}
+
+async function fetchJson(path) {
+  const res = await fetch(path, { cache: "no-cache" });
+  if (!res.ok) throw new Error(`Failed to fetch ${path}: ${res.status}`);
+  return res.json();
+}
+
+async function fetchText(path) {
+  const res = await fetch(path, { cache: "no-cache" });
+  if (!res.ok) throw new Error(`Failed to fetch ${path}: ${res.status}`);
+  return res.text();
+}
+
+function renderNav(pages, activePath, filter) {
+  const q = (filter || "").trim().toLowerCase();
+  const filtered = q
+    ? pages.filter((p) => (p.title || p.path).toLowerCase().includes(q))
+    : pages;
+
+  if (!filtered.length) {
+    navEl.innerHTML = `<div class="empty">No matches.</div>`;
+    return;
+  }
+
+  navEl.innerHTML = filtered
+    .map((p) => {
+      const path = normalizeDocPath(p.path);
+      const title = escapeHtml(p.title || path);
+      const current = activePath === path ? ` aria-current="page"` : "";
+      return `<a href="#${encodeURIComponent(path)}"${current}>${title}</a>`;
+    })
+    .join("");
+}
+
+function installContentLinkHandler() {
+  contentEl.addEventListener("click", (e) => {
+    const a = e.target?.closest?.("a");
+    if (!a) return;
+
+    const href = a.getAttribute("href") || "";
+    if (
+      href.startsWith("http://") ||
+      href.startsWith("https://") ||
+      href.startsWith("mailto:") ||
+      href.startsWith("#")
+    ) {
+      return;
+    }
+
+    // Route relative markdown links through the SPA.
+    if (href.endsWith(".md")) {
+      e.preventDefault();
+      setSelectedPath(href);
+      return;
+    }
+  });
+}
+
+async function main() {
+  if (!globalThis.marked) {
+    contentEl.innerHTML = `<p class="empty">Markdown renderer failed to load.</p>`;
+    return;
+  }
+
+  installContentLinkHandler();
+
+  let manifest;
+  try {
+    manifest = await fetchJson("./manifest.json");
+  } catch (e) {
+    contentEl.innerHTML = `<p class="empty">Missing <code>manifest.json</code>. Deploy the site via CI.</p>`;
+    navEl.innerHTML = "";
+    console.error(e);
+    return;
+  }
+
+  const pages = Array.isArray(manifest.pages) ? manifest.pages : [];
+  const defaultPath = pages[0]?.path ? normalizeDocPath(pages[0].path) : null;
+
+  async function render() {
+    const activePath = getSelectedPath() || defaultPath;
+    renderNav(pages, activePath, searchEl.value);
+
+    if (!activePath) {
+      contentEl.innerHTML = `<p class="empty">No docs yet. Add markdown files under <code>zat/docs/</code> and push to <code>main</code>.</p>`;
+      return;
+    }
+
+    try {
+      const md = await fetchText(`./docs/${encodeURIComponent(activePath)}`);
+      const html = globalThis.marked.parse(md);
+      contentEl.innerHTML = html;
+
+      // Update current marker after navigation re-render.
+      for (const a of navEl.querySelectorAll("a")) {
+        const href = decodeURIComponent((a.getAttribute("href") || "").slice(1));
+        a.toggleAttribute("aria-current", normalizeDocPath(href) === activePath);
+      }
+    } catch (e) {
+      contentEl.innerHTML = `<p class="empty">Failed to load <code>${escapeHtml(
+        activePath,
+      )}</code>.</p>`;
+      console.error(e);
+    }
+  }
+
+  searchEl.addEventListener("input", () => render());
+  window.addEventListener("hashchange", () => render());
+
+  if (!getSelectedPath() && defaultPath) setSelectedPath(defaultPath);
+  await render();
+}
+
+main();
