@@ -1,6 +1,5 @@
 const navEl = document.getElementById("nav");
 const contentEl = document.getElementById("content");
-const searchEl = document.getElementById("search");
 
 function escapeHtml(text) {
   return text
@@ -42,18 +41,13 @@ async function fetchText(path) {
   return res.text();
 }
 
-function renderNav(pages, activePath, filter) {
-  const q = (filter || "").trim().toLowerCase();
-  const filtered = q
-    ? pages.filter((p) => (p.title || p.path).toLowerCase().includes(q))
-    : pages;
-
-  if (!filtered.length) {
-    navEl.innerHTML = `<div class="empty">No matches.</div>`;
+function renderNav(pages, activePath) {
+  if (!pages.length) {
+    navEl.innerHTML = "";
     return;
   }
 
-  navEl.innerHTML = filtered
+  navEl.innerHTML = pages
     .map((p) => {
       const path = normalizeDocPath(p.path);
       const title = escapeHtml(p.title || path);
@@ -110,7 +104,7 @@ async function main() {
 
   async function render() {
     const activePath = getSelectedPath() || defaultPath;
-    renderNav(pages, activePath, searchEl.value);
+    renderNav(pages, activePath);
 
     if (!activePath) {
       contentEl.innerHTML = `<p class="empty">No docs yet. Add markdown files under <code>zat/docs/</code> and push to <code>main</code>.</p>`;
@@ -135,7 +129,6 @@ async function main() {
     }
   }
 
-  searchEl.addEventListener("input", () => render());
   window.addEventListener("hashchange", () => render());
 
   if (!getSelectedPath() && defaultPath) setSelectedPath(defaultPath);

@@ -77,21 +77,6 @@ a:hover {
   text-decoration: none;
 }
 
-.search {
-  margin-left: auto;
-  width: min(520px, 60vw);
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--panel);
-  color: var(--text);
-  outline: none;
-}
-.search:focus {
-  border-color: color-mix(in srgb, var(--link) 50%, var(--border));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--link) 22%, transparent);
-}
-
 .layout {
   display: grid;
   grid-template-columns: 280px 1fr;
