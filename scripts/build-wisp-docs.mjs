@@ -57,6 +57,15 @@ function titleFromMarkdown(md, fallback) {
   return fallback.replace(/\.md$/i, "");
 }
 
+function normalizeTitle(title) {
+  let t = String(title || "").trim();
+  // If pages follow a "zat - ..." style, drop the redundant prefix in the nav.
+  t = t.replace(/^zat\s*-\s*/i, "");
+  // Cheaply capitalize (keeps the rest as-authored).
+  if (t.length) t = t[0].toUpperCase() + t.slice(1);
+  return t;
+}
+
 async function getBuildId() {
   try {
     const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
@@ -110,7 +119,10 @@ async function main() {
     if (await exists(readme)) {
       const md = await readFile(readme, "utf8");
       await writeFile(path.join(outDocsDir, "index.md"), md, "utf8");
-      pages.push({ path: "index.md", title: titleFromMarkdown(md, "index.md") });
+      pages.push({
+        path: "index.md",
+        title: normalizeTitle(titleFromMarkdown(md, "index.md")),
+      });
     }
   }
 
@@ -121,7 +133,7 @@ async function main() {
     await writeFile(path.join(outDocsDir, "changelog.md"), md, "utf8");
     pages.push({
       path: "changelog.md",
-      title: titleFromMarkdown(md, "changelog.md"),
+      title: normalizeTitle(titleFromMarkdown(md, "changelog.md")),
     });
   }
 
@@ -134,7 +146,7 @@ async function main() {
     await cp(src, dst);
 
     const md = await readFile(src, "utf8");
-    pages.push({ path: rel, title: titleFromMarkdown(md, rel) });
+    pages.push({ path: rel, title: normalizeTitle(titleFromMarkdown(md, rel)) });
   }
 
   await writeFile(
