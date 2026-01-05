@@ -149,13 +149,36 @@ a:hover {
   justify-content: center;
 }
 
-.content {
+.main-inner {
   width: min(var(--max), 100%);
+}
+
+.content {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--panel);
   box-shadow: 0 12px 40px var(--shadow);
   padding: 24px;
+}
+
+.footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 4px 0;
+}
+
+.footer-link {
+  font-size: 13px;
+  color: var(--muted);
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+}
+.footer-link:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--codebg) 70%, transparent);
+  border-color: var(--border);
+  text-decoration: none;
 }
 
 .content h1,
