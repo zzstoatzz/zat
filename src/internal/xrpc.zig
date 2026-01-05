@@ -162,4 +162,3 @@ test "build url with params" {
     try std.testing.expect(std.mem.startsWith(u8, url, "https://bsky.social/xrpc/app.bsky.actor.getProfile?"));
     try std.testing.expect(std.mem.indexOf(u8, url, "actor=did%3Aplc%3Atest123") != null);
 }
-
