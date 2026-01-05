@@ -93,6 +93,30 @@ if (response.ok()) {
 </details>
 
 <details>
+<summary><strong>sync types</strong> - enums for firehose/event stream consumption</summary>
+
+```zig
+// use in struct definitions for automatic json parsing:
+const RepoOp = struct {
+    action: zat.CommitAction,  // .create, .update, .delete
+    path: []const u8,
+    cid: ?[]const u8,
+};
+
+// then exhaustive switch:
+switch (op.action) {
+    .create, .update => processUpsert(op),
+    .delete => processDelete(op),
+}
+```
+
+- **CommitAction** - `.create`, `.update`, `.delete`
+- **EventKind** - `.commit`, `.sync`, `.identity`, `.account`, `.info`
+- **AccountStatus** - `.takendown`, `.suspended`, `.deleted`, `.deactivated`, `.desynchronized`, `.throttled`
+
+</details>
+
+<details>
 <summary><strong>json helpers</strong> - navigate nested json without verbose if-chains</summary>
 
 ```zig
@@ -149,6 +173,14 @@ const parsed = try zat.multicodec.parsePublicKey(key_bytes);
 ## specs
 
 validation follows [atproto.com/specs](https://atproto.com/specs/atp).
+
+## versioning
+
+pre-1.0 semver:
+- `0.x.0` - new features (backwards compatible)
+- `0.x.y` - bug fixes
+
+breaking changes bump the minor version and are documented in commit messages.
 
 ## license
 

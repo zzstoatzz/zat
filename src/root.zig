@@ -26,3 +26,9 @@ pub const json = @import("internal/json.zig");
 pub const Jwt = @import("internal/jwt.zig").Jwt;
 pub const multibase = @import("internal/multibase.zig");
 pub const multicodec = @import("internal/multicodec.zig");
+
+// sync / firehose
+const sync = @import("internal/sync.zig");
+pub const CommitAction = sync.CommitAction;
+pub const EventKind = sync.EventKind;
+pub const AccountStatus = sync.AccountStatus;
