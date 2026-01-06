@@ -1,6 +1,6 @@
 # [zat](https://zat.dev)
 
-AT Protocol building blocks for zig. [read the roadmap](docs/roadmap.md).
+AT Protocol building blocks for zig. [roadmap](docs/roadmap.md) · [atproto records](https://at-me.zzstoatzz.io/view?handle=zat.dev)
 
 ## install
 
