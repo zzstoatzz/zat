@@ -14,9 +14,9 @@ environment:
   WISP_SITE_NAME: "docs"
 
 steps:
-  - name: build docs site
+  - name: build site
     command: |
-      bun ./scripts/build-wisp-docs.mjs
+      bun ./scripts/build-site.mjs
 
   - name: deploy docs to wisp
     command: |

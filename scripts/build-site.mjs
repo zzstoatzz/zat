@@ -158,13 +158,33 @@ async function main() {
     }
   }
 
-  // Copy devlog files to docs/devlog/ (accessible via SPA but not in sidebar)
+  // Copy devlog files to docs/devlog/ and generate an index
   const devlogFiles = (await exists(devlogDir)) ? await listMarkdownFiles(devlogDir) : [];
+  const devlogEntries = [];
+
   for (const rel of devlogFiles) {
     const src = path.join(devlogDir, rel);
     const dst = path.join(outDocsDir, "devlog", rel);
     await mkdir(path.dirname(dst), { recursive: true });
     await cp(src, dst);
+
+    const md = await readFile(src, "utf8");
+    devlogEntries.push({
+      path: `devlog/${rel}`,
+      title: titleFromMarkdown(md, rel),
+    });
+  }
+
+  // Generate devlog index listing all entries (newest first by filename)
+  if (devlogEntries.length > 0) {
+    devlogEntries.sort((a, b) => b.path.localeCompare(a.path));
+    const indexMd = [
+      "# devlog",
+      "",
+      ...devlogEntries.map((e) => `- [${e.title}](${e.path.replace("devlog/", "")})`),
+      "",
+    ].join("\n");
+    await writeFile(path.join(outDocsDir, "devlog", "index.md"), indexMd, "utf8");
   }
 
   // Stable nav order: README homepage, then roadmap, then changelog, then the rest.
