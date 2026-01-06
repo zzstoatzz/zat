@@ -1,42 +1,40 @@
 # roadmap
 
-`zat` is a grab bag of **AT Protocol building blocks** in Zig: parsers, validators, resolvers, and small protocol helpers.
+zat started as a small set of string primitives for AT Protocol - the types everyone reimplements (`Tid`, `Did`, `Handle`, `Nsid`, `Rkey`, `AtUri`). the scope grew based on real usage.
 
-This roadmap is intentionally short. If it doesn’t fit into one file, it probably belongs in issues.
+## history
+
+**initial scope** - string primitives with parsing and validation. the philosophy: primitives not frameworks, layered design, zig idioms, minimal scope.
+
+**what grew from usage:**
+- DID resolution was originally "out of scope" - real projects needed it, so `DidResolver` and `DidDocument` got added
+- XRPC client and JSON helpers - same story
+- JWT verification for service auth
+- handle resolution via HTTP well-known
+- handle resolution via DNS-over-HTTP (community contribution)
+- sync types for firehose consumption (`CommitAction`, `EventKind`, `AccountStatus`)
+
+this pattern - start minimal, expand based on real pain - continues.
 
 ## now
 
-- use zat in real projects and let usage drive what's next
-- keep current APIs stable (0.x semver)
-- tighten docs/examples as real apps discover sharp edges
-- keep the "primitives, not framework" ethos
+use zat in real projects. let usage drive what's next.
 
-## next
+the primitives are reasonably complete. what's missing will show up when people build things. until then, no speculative features.
 
-### polish
+## maybe later
 
-- improve docs around common workflows:
-  - ~~resolving handle → DID → PDS~~ done: `HandleResolver` (HTTP + DoH), `DidResolver`, `DidDocument`
-  - ~~making XRPC calls + parsing JSON~~ done: `Xrpc`, `json` helpers
-  - verifying JWTs from DID documents (`Jwt` exists, docs could be better)
-- add more integration tests that hit real-world edge cases (without becoming flaky)
+these stay out of scope unless real demand emerges:
 
-### primitives
-
-- fill gaps that show up repeatedly in other atproto projects:
-  - ~~CIDs and common multiformats plumbing~~ done: `multibase`, `multicodec`
-  - ~~richer `AtUri` helpers~~ done: `AtUri` with parsing, formatting
-  - ~~more ergonomic JSON navigation patterns~~ done: `json` module (still optional, no forced codegen)
-  - sync types for firehose consumption (`CommitAction`, `EventKind`, `AccountStatus`)
-
-## later (maybe)
-
-- lexicon codegen is still “probably a separate project”
-- higher-level clients/frameworks stay out of scope
+- lexicon codegen - probably a separate project
+- higher-level clients/frameworks - too opinionated
+- token refresh/session management - app-specific
+- feed generator scaffolding - each feed is unique
 
 ## non-goals
 
-- token refresh/session frameworks
-- opinionated app scaffolding
-- “one true SDK” that tries to do everything
+zat is not trying to be:
 
+- a "one true SDK" that does everything
+- an opinionated app framework
+- a replacement for understanding the protocol
