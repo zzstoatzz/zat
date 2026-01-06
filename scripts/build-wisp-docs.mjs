@@ -119,7 +119,9 @@ async function main() {
   if (!(await exists(docsIndex))) {
     const readme = path.join(repoRoot, "README.md");
     if (await exists(readme)) {
-      const md = await readFile(readme, "utf8");
+      let md = await readFile(readme, "utf8");
+      // Strip docs/ prefix from links since we're now inside the docs context.
+      md = md.replace(/\]\(docs\//g, "](");
       await writeFile(path.join(outDocsDir, "index.md"), md, "utf8");
       pages.push({
         path: "index.md",
