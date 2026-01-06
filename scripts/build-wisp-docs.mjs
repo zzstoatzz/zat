@@ -59,6 +59,8 @@ function titleFromMarkdown(md, fallback) {
 
 function normalizeTitle(title) {
   let t = String(title || "").trim();
+  // Strip markdown links: [text](url) -> text
+  t = t.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
   // If pages follow a "zat - ..." style, drop the redundant prefix in the nav.
   t = t.replace(/^zat\s*-\s*/i, "");
   // Cheaply capitalize (keeps the rest as-authored).
