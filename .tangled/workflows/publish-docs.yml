@@ -1,13 +1,6 @@
 when:
   - event: push
     tag: "v*"
-  - event: push
-    branch: main
-    path:
-      - "README.md"
-      - "CHANGELOG.md"
-      - "docs/**"
-      - "devlog/**"
 
 engine: nixery
 
@@ -18,6 +11,5 @@ dependencies:
 steps:
   - name: build and publish docs to ATProto
     command: |
-      test -n "$ATPROTO_PASSWORD"
       zig build
       ./zig-out/bin/publish-docs

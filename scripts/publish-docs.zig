@@ -82,21 +82,6 @@ pub fn main() !void {
 
         try putRecord(&client, allocator, session.did, "site.standard.document", tid.str(), doc_record);
         std.debug.print("published: {s} -> at://{s}/site.standard.document/{s}\n", .{ doc.file, session.did, tid.str() });
-
-        // also publish to leaflet
-        const leaflet_blocks = try parseMarkdownToLeafletBlocks(allocator, content);
-        const leaflet_page = LeafletPage{ .blocks = leaflet_blocks };
-        const leaflet_pages = try allocator.alloc(LeafletPage, 1);
-        leaflet_pages[0] = leaflet_page;
-
-        const leaflet_record = LeafletDocument{
-            .author = session.did,
-            .title = title,
-            .publishedAt = &now,
-            .pages = leaflet_pages,
-        };
-        try putRecord(&client, allocator, session.did, "pub.leaflet.document", tid.str(), leaflet_record);
-        std.debug.print("published: {s} -> at://{s}/pub.leaflet.document/{s}\n", .{ doc.file, session.did, tid.str() });
     }
 
     // devlog publication (clock_id 100 to separate from docs)
@@ -136,21 +121,6 @@ pub fn main() !void {
 
         try putRecord(&client, allocator, session.did, "site.standard.document", tid.str(), doc_record);
         std.debug.print("published: {s} -> at://{s}/site.standard.document/{s}\n", .{ entry.file, session.did, tid.str() });
-
-        // also publish to leaflet
-        const leaflet_blocks = try parseMarkdownToLeafletBlocks(allocator, content);
-        const leaflet_page = LeafletPage{ .blocks = leaflet_blocks };
-        const leaflet_pages = try allocator.alloc(LeafletPage, 1);
-        leaflet_pages[0] = leaflet_page;
-
-        const leaflet_record = LeafletDocument{
-            .author = session.did,
-            .title = title,
-            .publishedAt = &now,
-            .pages = leaflet_pages,
-        };
-        try putRecord(&client, allocator, session.did, "pub.leaflet.document", tid.str(), leaflet_record);
-        std.debug.print("published: {s} -> at://{s}/pub.leaflet.document/{s}\n", .{ entry.file, session.did, tid.str() });
     }
 
     std.debug.print("done\n", .{});
@@ -170,55 +140,6 @@ const Document = struct {
     path: ?[]const u8 = null,
     textContent: ?[]const u8 = null,
     publishedAt: []const u8,
-};
-
-// leaflet types
-const LeafletDocument = struct {
-    @"$type": []const u8 = "pub.leaflet.document",
-    author: []const u8,
-    title: []const u8,
-    publishedAt: ?[]const u8 = null,
-    pages: []const LeafletPage,
-};
-
-const LeafletPage = struct {
-    @"$type": []const u8 = "pub.leaflet.pages.linearDocument",
-    blocks: []const LeafletBlockWrapper,
-};
-
-const LeafletBlockWrapper = struct {
-    block: LeafletBlock,
-};
-
-const LeafletBlock = union(enum) {
-    header: HeaderBlock,
-    text: TextBlock,
-    code: CodeBlock,
-
-    pub fn jsonStringify(self: @This(), jw: anytype) !void {
-        switch (self) {
-            .header => |h| try jw.write(h),
-            .text => |t| try jw.write(t),
-            .code => |c| try jw.write(c),
-        }
-    }
-};
-
-const HeaderBlock = struct {
-    @"$type": []const u8 = "pub.leaflet.blocks.header",
-    plaintext: []const u8,
-    level: u8,
-};
-
-const TextBlock = struct {
-    @"$type": []const u8 = "pub.leaflet.blocks.text",
-    plaintext: []const u8,
-};
-
-const CodeBlock = struct {
-    @"$type": []const u8 = "pub.leaflet.blocks.code",
-    plaintext: []const u8,
-    language: ?[]const u8 = null,
 };
 
 const Session = struct {
@@ -339,121 +260,4 @@ fn timestamp() [20]u8 {
         @as(u32, @intCast(y)), @as(u32, @intCast(m + 1)), @as(u32, @intCast(remaining + 1)), hours, mins, secs,
     }) catch unreachable;
     return buf;
-}
-
-/// parse markdown into leaflet blocks (minimal: headers, code, paragraphs)
-fn parseMarkdownToLeafletBlocks(allocator: Allocator, markdown: []const u8) ![]LeafletBlockWrapper {
-    var blocks: std.ArrayList(LeafletBlockWrapper) = .empty;
-    errdefer blocks.deinit(allocator);
-
-    var lines = std.mem.splitScalar(u8, markdown, '\n');
-    var in_code_block = false;
-    var code_content: std.ArrayList(u8) = .empty;
-    defer code_content.deinit(allocator);
-    var code_lang: ?[]const u8 = null;
-    var paragraph_lines: std.ArrayList([]const u8) = .empty;
-    defer paragraph_lines.deinit(allocator);
-
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-
-        // handle code blocks
-        if (std.mem.startsWith(u8, trimmed, "```")) {
-            if (in_code_block) {
-                // end code block
-                try blocks.append(allocator, .{ .block = .{ .code = .{
-                    .plaintext = try allocator.dupe(u8, code_content.items),
-                    .language = code_lang,
-                } } });
-                code_content.clearRetainingCapacity();
-                code_lang = null;
-                in_code_block = false;
-            } else {
-                // flush any pending paragraph first
-                if (paragraph_lines.items.len > 0) {
-                    const para_text = try std.mem.join(allocator, " ", paragraph_lines.items);
-                    if (para_text.len > 0) {
-                        try blocks.append(allocator, .{ .block = .{ .text = .{ .plaintext = para_text } } });
-                    }
-                    paragraph_lines.clearRetainingCapacity();
-                }
-                // start code block
-                in_code_block = true;
-                const lang_part = trimmed[3..];
-                if (lang_part.len > 0) {
-                    code_lang = try allocator.dupe(u8, lang_part);
-                }
-            }
-            continue;
-        }
-
-        if (in_code_block) {
-            if (code_content.items.len > 0) {
-                try code_content.append(allocator, '\n');
-            }
-            try code_content.appendSlice(allocator, line);
-            continue;
-        }
-
-        // handle headers
-        if (trimmed.len > 0 and trimmed[0] == '#') {
-            // flush any pending paragraph first
-            if (paragraph_lines.items.len > 0) {
-                const para_text = try std.mem.join(allocator, " ", paragraph_lines.items);
-                if (para_text.len > 0) {
-                    try blocks.append(allocator, .{ .block = .{ .text = .{ .plaintext = para_text } } });
-                }
-                paragraph_lines.clearRetainingCapacity();
-            }
-
-            var level: u8 = 0;
-            for (trimmed) |c| {
-                if (c == '#') level += 1 else break;
-            }
-            if (level > 0 and level <= 6 and trimmed.len > level and trimmed[level] == ' ') {
-                var header_text = trimmed[level + 1 ..];
-                // strip markdown link: [text](url) -> text
-                if (std.mem.indexOf(u8, header_text, "](")) |bracket| {
-                    if (header_text[0] == '[') {
-                        header_text = header_text[1..bracket];
-                    }
-                }
-                try blocks.append(allocator, .{ .block = .{ .header = .{
-                    .plaintext = try allocator.dupe(u8, header_text),
-                    .level = level,
-                } } });
-                continue;
-            }
-        }
-
-        // blank line ends paragraph
-        if (trimmed.len == 0) {
-            if (paragraph_lines.items.len > 0) {
-                const para_text = try std.mem.join(allocator, " ", paragraph_lines.items);
-                if (para_text.len > 0) {
-                    try blocks.append(allocator, .{ .block = .{ .text = .{ .plaintext = para_text } } });
-                }
-                paragraph_lines.clearRetainingCapacity();
-            }
-            continue;
-        }
-
-        // accumulate paragraph lines
-        try paragraph_lines.append(allocator, try allocator.dupe(u8, trimmed));
-    }
-
-    // flush remaining content
-    if (in_code_block and code_content.items.len > 0) {
-        try blocks.append(allocator, .{ .block = .{ .code = .{
-            .plaintext = try allocator.dupe(u8, code_content.items),
-            .language = code_lang,
-        } } });
-    } else if (paragraph_lines.items.len > 0) {
-        const para_text = try std.mem.join(allocator, " ", paragraph_lines.items);
-        if (para_text.len > 0) {
-            try blocks.append(allocator, .{ .block = .{ .text = .{ .plaintext = para_text } } });
-        }
-    }
-
-    return blocks.toOwnedSlice(allocator);
 }
