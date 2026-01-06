@@ -3,11 +3,18 @@ const zat = @import("zat");
 
 const Allocator = std.mem.Allocator;
 
+const DocEntry = struct { path: []const u8, file: []const u8 };
+
 /// docs to publish as site.standard.document records
-const docs = [_]struct { path: []const u8, file: []const u8 }{
+const docs = [_]DocEntry{
     .{ .path = "/", .file = "README.md" },
     .{ .path = "/roadmap", .file = "docs/roadmap.md" },
     .{ .path = "/changelog", .file = "CHANGELOG.md" },
+};
+
+/// devlog entries
+const devlog = [_]DocEntry{
+    .{ .path = "/001", .file = "devlog/001-self-publishing-docs.md" },
 };
 
 pub fn main() !void {
@@ -75,6 +82,45 @@ pub fn main() !void {
 
         try putRecord(&client, allocator, session.did, "site.standard.document", tid.str(), doc_record);
         std.debug.print("published: {s} -> at://{s}/site.standard.document/{s}\n", .{ doc.file, session.did, tid.str() });
+    }
+
+    // devlog publication (clock_id 100 to separate from docs)
+    const devlog_tid = zat.Tid.fromTimestamp(1704067200000000, 100);
+    const devlog_pub = Publication{
+        .url = "https://zat.dev/devlog",
+        .name = "zat devlog",
+        .description = "building zat in public",
+    };
+
+    try putRecord(&client, allocator, session.did, "site.standard.publication", devlog_tid.str(), devlog_pub);
+    std.debug.print("created publication: at://{s}/site.standard.publication/{s}\n", .{ session.did, devlog_tid.str() });
+
+    var devlog_uri_buf: std.ArrayList(u8) = .empty;
+    defer devlog_uri_buf.deinit(allocator);
+    try devlog_uri_buf.print(allocator, "at://{s}/site.standard.publication/{s}", .{ session.did, devlog_tid.str() });
+    const devlog_uri = devlog_uri_buf.items;
+
+    // publish devlog entries (clock_id 101, 102, ...)
+    for (devlog, 0..) |entry, i| {
+        const content = std.fs.cwd().readFileAlloc(allocator, entry.file, 1024 * 1024) catch |err| {
+            std.debug.print("warning: could not read {s}: {}\n", .{ entry.file, err });
+            continue;
+        };
+        defer allocator.free(content);
+
+        const title = extractTitle(content) orelse entry.file;
+        const tid = zat.Tid.fromTimestamp(1704067200000000, @intCast(101 + i));
+
+        const doc_record = Document{
+            .site = devlog_uri,
+            .title = title,
+            .path = entry.path,
+            .textContent = content,
+            .publishedAt = &now,
+        };
+
+        try putRecord(&client, allocator, session.did, "site.standard.document", tid.str(), doc_record);
+        std.debug.print("published: {s} -> at://{s}/site.standard.document/{s}\n", .{ entry.file, session.did, tid.str() });
     }
 
     std.debug.print("done\n", .{});
