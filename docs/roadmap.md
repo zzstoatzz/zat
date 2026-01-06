@@ -6,26 +6,28 @@ This roadmap is intentionally short. If it doesn’t fit into one file, it proba
 
 ## now
 
+- use zat in real projects and let usage drive what's next
 - keep current APIs stable (0.x semver)
 - tighten docs/examples as real apps discover sharp edges
-- keep the “primitives, not framework” ethos
+- keep the "primitives, not framework" ethos
 
 ## next
 
 ### polish
 
 - improve docs around common workflows:
-  - resolving handle → DID → PDS
-  - making XRPC calls + parsing JSON
-  - verifying JWTs from DID documents
+  - ~~resolving handle → DID → PDS~~ done: `HandleResolver` (HTTP + DoH), `DidResolver`, `DidDocument`
+  - ~~making XRPC calls + parsing JSON~~ done: `Xrpc`, `json` helpers
+  - verifying JWTs from DID documents (`Jwt` exists, docs could be better)
 - add more integration tests that hit real-world edge cases (without becoming flaky)
 
 ### primitives
 
 - fill gaps that show up repeatedly in other atproto projects:
-  - CIDs and common multiformats plumbing
-  - richer `AtUri` helpers (safe joins, parsing variants)
-  - more ergonomic JSON navigation patterns (still optional, no forced codegen)
+  - ~~CIDs and common multiformats plumbing~~ done: `multibase`, `multicodec`
+  - ~~richer `AtUri` helpers~~ done: `AtUri` with parsing, formatting
+  - ~~more ergonomic JSON navigation patterns~~ done: `json` module (still optional, no forced codegen)
+  - sync types for firehose consumption (`CommitAction`, `EventKind`, `AccountStatus`)
 
 ## later (maybe)
 
