@@ -139,7 +139,7 @@ async function main() {
     }
 
     try {
-      const md = await fetchText(`./docs/${encodeURIComponent(activePath)}`);
+      const md = await fetchText(`./docs/${activePath}`);
       const html = globalThis.marked.parse(md);
       contentEl.innerHTML = html;
 
