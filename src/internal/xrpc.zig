@@ -18,6 +18,9 @@ pub const XrpcClient = struct {
     /// bearer token for authenticated requests
     access_token: ?[]const u8 = null,
 
+    /// atproto JWTs are ~1KB; buffer needs room for "Bearer " prefix
+    const max_auth_header_len = 2048;
+
     pub fn init(allocator: std.mem.Allocator, host: []const u8) XrpcClient {
         return .{
             .allocator = allocator,
@@ -89,8 +92,9 @@ pub const XrpcClient = struct {
         // https://github.com/ziglang/zig/issues/25021
         var extra_headers: std.http.Client.Request.Headers = .{
             .accept_encoding = .{ .override = "identity" },
+            .content_type = if (body != null) .{ .override = "application/json" } else .default,
         };
-        var auth_header_buf: [256]u8 = undefined;
+        var auth_header_buf: [max_auth_header_len]u8 = undefined;
         if (self.access_token) |token| {
             const auth_value = try std.fmt.bufPrint(&auth_header_buf, "Bearer {s}", .{token});
             extra_headers.authorization = .{ .override = auth_value };
