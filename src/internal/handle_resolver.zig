@@ -70,7 +70,7 @@ pub const HandleResolver = struct {
         return try self.allocator.dupe(u8, did_str);
     }
 
-    /// resolve via DoH default: https://cloudflare-dns.com/dns-query 
+    /// resolve via DoH default: https://cloudflare-dns.com/dns-query
     pub fn resolveDns(self: *HandleResolver, handle: Handle) ![]const u8 {
         const dns_name = try std.fmt.allocPrint(
             self.allocator,
