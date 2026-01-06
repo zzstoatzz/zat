@@ -13,6 +13,7 @@ import { promisify } from "node:util";
 
 const repoRoot = path.resolve(new URL("..", import.meta.url).pathname);
 const docsDir = path.join(repoRoot, "docs");
+const devlogDir = path.join(repoRoot, "devlog");
 const siteSrcDir = path.join(repoRoot, "site");
 const outDir = path.join(repoRoot, "site-out");
 const outDocsDir = path.join(outDir, "docs");
@@ -155,6 +156,15 @@ async function main() {
     if (!rel.startsWith("archive/")) {
       pages.push({ path: rel, title: normalizeTitle(titleFromMarkdown(md, rel)) });
     }
+  }
+
+  // Copy devlog files to docs/devlog/ (accessible via SPA but not in sidebar)
+  const devlogFiles = (await exists(devlogDir)) ? await listMarkdownFiles(devlogDir) : [];
+  for (const rel of devlogFiles) {
+    const src = path.join(devlogDir, rel);
+    const dst = path.join(outDocsDir, "devlog", rel);
+    await mkdir(path.dirname(dst), { recursive: true });
+    await cp(src, dst);
   }
 
   // Stable nav order: README homepage, then roadmap, then changelog, then the rest.
