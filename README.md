@@ -5,7 +5,7 @@ AT Protocol building blocks for zig. [roadmap](docs/roadmap.md) · [atproto reco
 ## install
 
 ```bash
-zig fetch --save https://tangled.sh/zzstoatzz.io/zat/archive/main
+zig fetch --save https://tangled.sh/zat.dev/zat/archive/main
 ```
 
 then in `build.zig`:
