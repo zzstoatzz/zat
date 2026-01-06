@@ -1,5 +1,10 @@
 # changelog
 
+## 0.1.1
+
+- xrpc client sets `Content-Type: application/json` for POST requests
+- docs published as `site.standard.document` records on tag releases
+
 ## 0.1.0
 
 sync types for firehose consumption:

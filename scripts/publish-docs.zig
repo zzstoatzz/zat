@@ -183,7 +183,7 @@ fn extractTitle(content: []const u8) ?[]const u8 {
     return null;
 }
 
-fn timestamp() [24]u8 {
+fn timestamp() [20]u8 {
     const epoch_seconds = std.time.timestamp();
     const days: i32 = @intCast(@divFloor(epoch_seconds, std.time.s_per_day));
     const day_secs: u32 = @intCast(@mod(epoch_seconds, std.time.s_per_day));
@@ -209,7 +209,7 @@ fn timestamp() [24]u8 {
     const mins = (day_secs % 3600) / 60;
     const secs = day_secs % 60;
 
-    var buf: [24]u8 = undefined;
+    var buf: [20]u8 = undefined;
     _ = std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
         @as(u32, @intCast(y)), @as(u32, @intCast(m + 1)), @as(u32, @intCast(remaining + 1)), hours, mins, secs,
     }) catch unreachable;

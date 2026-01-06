@@ -6,19 +6,17 @@ engine: nixery
 
 dependencies:
   nixpkgs:
-    - nodejs
-    - coreutils
+    - bun
     - curl
 
 environment:
-  # Use DID directly to avoid handle-resolution issues in CI.
   WISP_DID: "did:plc:mkqt76xvfgxuemlwlx6ruc3w"
   WISP_SITE_NAME: "docs"
 
 steps:
   - name: build docs site
     command: |
-      node ./scripts/build-wisp-docs.mjs
+      bun ./scripts/build-wisp-docs.mjs
 
   - name: deploy docs to wisp
     command: |

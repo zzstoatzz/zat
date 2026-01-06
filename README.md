@@ -1,6 +1,15 @@
 # [zat](https://zat.dev)
 
-AT Protocol building blocks for zig. [roadmap](docs/roadmap.md) · [atproto records](https://at-me.zzstoatzz.io/view?handle=zat.dev)
+AT Protocol building blocks for zig.
+
+<details>
+<summary><strong>this readme is an ATProto record</strong></summary>
+
+→ [view in zat.dev's repository](https://at-me.zzstoatzz.io/view?handle=zat.dev)
+
+zat publishes these docs as [`site.standard.document`](https://standard.site) records, signed by its DID.
+
+</details>
 
 ## install
 
@@ -185,3 +194,7 @@ breaking changes bump the minor version and are documented in commit messages.
 ## license
 
 MIT
+
+---
+
+[roadmap](docs/roadmap.md) · [changelog](CHANGELOG.md)
