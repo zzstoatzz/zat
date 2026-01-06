@@ -181,7 +181,7 @@ async function main() {
     const indexMd = [
       "# devlog",
       "",
-      ...devlogEntries.map((e) => `- [${e.title}](${e.path.replace("devlog/", "")})`),
+      ...devlogEntries.map((e) => `- [${e.title}](${e.path})`),
       "",
     ].join("\n");
     await writeFile(path.join(outDocsDir, "devlog", "index.md"), indexMd, "utf8");
