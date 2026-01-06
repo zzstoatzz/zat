@@ -1,3 +1,7 @@
+# archived: initial plan (out of date)
+
+This file is preserved for context/history. Current direction lives in `docs/roadmap.md`.
+
 # zat - zig atproto primitives
 
 low-level building blocks for atproto applications in zig. not a full sdk - just the pieces that everyone reimplements.

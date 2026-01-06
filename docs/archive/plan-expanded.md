@@ -1,3 +1,7 @@
+# archived: expanded plan (partially implemented)
+
+This file is preserved for context/history. Current direction lives in `docs/roadmap.md`.
+
 # zat - expanded scope
 
 the initial release delivered string primitives (Tid, Did, Handle, Nsid, Rkey, AtUri). this plan expands toward a usable AT Protocol sdk.

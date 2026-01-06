@@ -139,6 +139,8 @@ async function main() {
 
   const mdFiles = (await exists(docsDir)) ? await listMarkdownFiles(docsDir) : [];
 
+  // Copy all markdown under docs/ (including archives), but only include non-archive
+  // paths in the sidebar manifest.
   for (const rel of mdFiles) {
     const src = path.join(docsDir, rel);
     const dst = path.join(outDocsDir, rel);
@@ -146,8 +148,24 @@ async function main() {
     await cp(src, dst);
 
     const md = await readFile(src, "utf8");
-    pages.push({ path: rel, title: normalizeTitle(titleFromMarkdown(md, rel)) });
+    if (!rel.startsWith("archive/")) {
+      pages.push({ path: rel, title: normalizeTitle(titleFromMarkdown(md, rel)) });
+    }
   }
+
+  // Stable nav order: README homepage, then roadmap, then changelog, then the rest.
+  pages.sort((a, b) => {
+    const order = (p) => {
+      if (p === "index.md") return 0;
+      if (p === "roadmap.md") return 1;
+      if (p === "changelog.md") return 2;
+      return 3;
+    };
+    const ao = order(a.path);
+    const bo = order(b.path);
+    if (ao !== bo) return ao - bo;
+    return a.title.localeCompare(b.title);
+  });
 
   await writeFile(
     path.join(outDir, "manifest.json"),
