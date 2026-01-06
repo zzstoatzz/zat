@@ -1,5 +1,24 @@
 const navEl = document.getElementById("nav");
 const contentEl = document.getElementById("content");
+const menuToggle = document.querySelector(".menu-toggle");
+const sidebar = document.querySelector(".sidebar");
+const overlay = document.querySelector(".overlay");
+
+function toggleMenu(open) {
+  const isOpen = open ?? !sidebar.classList.contains("open");
+  sidebar.classList.toggle("open", isOpen);
+  overlay?.classList.toggle("open", isOpen);
+  menuToggle?.setAttribute("aria-expanded", isOpen);
+  document.body.style.overflow = isOpen ? "hidden" : "";
+}
+
+menuToggle?.addEventListener("click", () => toggleMenu());
+overlay?.addEventListener("click", () => toggleMenu(false));
+
+// Close menu when nav link clicked (mobile)
+navEl?.addEventListener("click", (e) => {
+  if (e.target.closest("a")) toggleMenu(false);
+});
 
 const buildId = new URL(import.meta.url).searchParams.get("v") || "";
 
