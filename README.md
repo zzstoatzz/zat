@@ -1,6 +1,6 @@
-# zat
+# [zat](https://zat.dev)
 
-zig primitives for AT Protocol.
+AT Protocol building blocks for zig. [read the roadmap](docs/roadmap.md).
 
 ## install
 
