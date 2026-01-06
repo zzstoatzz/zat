@@ -134,8 +134,13 @@ a:hover {
   opacity: 0.8;
 }
 
-.header-link {
+.header-links {
+  display: flex;
+  gap: 8px;
   margin-left: auto;
+}
+
+.header-link {
   padding: 6px 12px;
   font-size: 14px;
   border-radius: 8px;
