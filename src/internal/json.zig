@@ -6,8 +6,12 @@
 //! two approaches:
 //! - runtime paths: getString(value, "embed.external.uri") - for dynamic paths
 //! - comptime paths: extractAt(T, alloc, value, .{"embed", "external"}) - for static paths with type safety
+//!
+//! debug logging:
+//! enable with `pub const std_options = .{ .log_scope_levels = &.{.{ .scope = .zat, .level = .debug }} };`
 
 const std = @import("std");
+const log = std.log.scoped(.zat);
 
 /// navigate a json value by dot-separated path
 /// returns null if any segment is missing or wrong type
@@ -92,6 +96,8 @@ pub fn getObject(value: std.json.Value, path: []const u8) ?std.json.ObjectMap {
 /// extract a typed struct from a nested path
 /// uses comptime tuple for path segments - no runtime string parsing
 /// leverages std.json.parseFromValueLeaky for type-safe extraction
+///
+/// on failure, logs diagnostic info when debug logging is enabled for .zat scope
 pub fn extractAt(
     comptime T: type,
     allocator: std.mem.Allocator,
@@ -101,11 +107,33 @@ pub fn extractAt(
     var current = value;
     inline for (path) |segment| {
         current = switch (current) {
-            .object => |obj| obj.get(segment) orelse return error.MissingField,
-            else => return error.UnexpectedToken,
+            .object => |obj| obj.get(segment) orelse {
+                log.debug("extractAt: missing field \"{s}\" in path {any}, expected {s}", .{
+                    segment,
+                    path,
+                    @typeName(T),
+                });
+                return error.MissingField;
+            },
+            else => {
+                log.debug("extractAt: expected object at \"{s}\" in path {any}, got {s}", .{
+                    segment,
+                    path,
+                    @tagName(current),
+                });
+                return error.UnexpectedToken;
+            },
         };
     }
-    return std.json.parseFromValueLeaky(T, allocator, current, .{});
+    return std.json.parseFromValueLeaky(T, allocator, current, .{}) catch |err| {
+        log.debug("extractAt: parse failed for {s} at path {any}: {s} (json type: {s})", .{
+            @typeName(T),
+            path,
+            @errorName(err),
+            @tagName(current),
+        });
+        return err;
+    };
 }
 
 /// extract a typed value, returning null if path doesn't exist
@@ -277,4 +305,45 @@ test "extractAtOptional returns null on missing path" {
 
     const missing = extractAtOptional(Thing, arena.allocator(), parsed.value, .{"missing"});
     try std.testing.expect(missing == null);
+}
+
+test "extractAt logs diagnostic on enum parse failure" {
+    // simulates the issue: unknown enum value from external API
+    const json_str =
+        \\{"op": {"action": "archive", "path": "app.bsky.feed.post/abc"}}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), json_str, .{});
+
+    const Action = enum { create, update, delete };
+    const Op = struct {
+        action: Action,
+        path: []const u8,
+    };
+
+    // "archive" is not a valid Action variant - this should fail
+    // with debug logging enabled, you'd see:
+    //   debug(zat): extractAt: parse failed for json.Op at path { "op" }: InvalidEnumTag (json type: object)
+    const result = extractAtOptional(Op, arena.allocator(), parsed.value, .{"op"});
+    try std.testing.expect(result == null);
+}
+
+test "extractAt logs diagnostic on missing field" {
+    const json_str =
+        \\{"data": {"name": "test"}}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), json_str, .{});
+
+    const Thing = struct { value: i64 };
+
+    // path "data.missing" doesn't exist
+    // with debug logging enabled, you'd see:
+    //   debug(zat): extractAt: missing field "missing" in path { "data", "missing" }, expected json.Thing
+    const result = extractAtOptional(Thing, arena.allocator(), parsed.value, .{ "data", "missing" });
+    try std.testing.expect(result == null);
 }
