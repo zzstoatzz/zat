@@ -1,5 +1,9 @@
 # changelog
 
+## 0.1.2
+
+- `extractAt` now logs diagnostic info on parse failures (enable with `.zat` debug scope)
+
 ## 0.1.1
 
 - xrpc client sets `Content-Type: application/json` for POST requests
