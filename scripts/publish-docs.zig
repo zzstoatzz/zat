@@ -14,7 +14,7 @@ const docs = [_]DocEntry{
 
 /// devlog entries
 const devlog = [_]DocEntry{
-    .{ .path = "/001", .file = "devlog/001-self-publishing-docs.md" },
+    .{ .path = "/devlog/001", .file = "devlog/001-self-publishing-docs.md" },
 };
 
 pub fn main() !void {
@@ -87,7 +87,7 @@ pub fn main() !void {
     // devlog publication (clock_id 100 to separate from docs)
     const devlog_tid = zat.Tid.fromTimestamp(1704067200000000, 100);
     const devlog_pub = Publication{
-        .url = "https://zat.dev/devlog",
+        .url = "https://zat.dev",
         .name = "zat devlog",
         .description = "building zat in public",
     };
