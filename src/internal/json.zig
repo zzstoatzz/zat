@@ -125,7 +125,7 @@ pub fn extractAt(
             },
         };
     }
-    return std.json.parseFromValueLeaky(T, allocator, current, .{}) catch |err| {
+    return std.json.parseFromValueLeaky(T, allocator, current, .{ .ignore_unknown_fields = true }) catch |err| {
         log.debug("extractAt: parse failed for {s} at path {any}: {s} (json type: {s})", .{
             @typeName(T),
             path,
@@ -346,4 +346,39 @@ test "extractAt logs diagnostic on missing field" {
     //   debug(zat): extractAt: missing field "missing" in path { "data", "missing" }, expected json.Thing
     const result = extractAtOptional(Thing, arena.allocator(), parsed.value, .{ "data", "missing" });
     try std.testing.expect(result == null);
+}
+
+test "extractAt ignores unknown fields" {
+    // real-world case: TAP messages have extra fields (live, rev, cid) that we don't need
+    const json_str =
+        \\{
+        \\  "record": {
+        \\    "live": true,
+        \\    "did": "did:plc:abc123",
+        \\    "rev": "3mbspmpaidl2a",
+        \\    "collection": "pub.leaflet.document",
+        \\    "rkey": "xyz789",
+        \\    "action": "create",
+        \\    "cid": "bafyreitest"
+        \\  }
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), json_str, .{});
+
+    // only extract the fields we care about
+    const Record = struct {
+        collection: []const u8,
+        action: []const u8,
+        did: []const u8,
+        rkey: []const u8,
+    };
+
+    const rec = try extractAt(Record, arena.allocator(), parsed.value, .{"record"});
+    try std.testing.expectEqualStrings("pub.leaflet.document", rec.collection);
+    try std.testing.expectEqualStrings("create", rec.action);
+    try std.testing.expectEqualStrings("did:plc:abc123", rec.did);
+    try std.testing.expectEqualStrings("xyz789", rec.rkey);
 }
