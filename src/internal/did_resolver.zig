@@ -7,10 +7,11 @@
 const std = @import("std");
 const Did = @import("did.zig").Did;
 const DidDocument = @import("did_document.zig").DidDocument;
+const HttpTransport = @import("transport.zig").HttpTransport;
 
 pub const DidResolver = struct {
     allocator: std.mem.Allocator,
-    http_client: std.http.Client,
+    transport: HttpTransport,
 
     /// plc directory url (default: https://plc.directory)
     plc_url: []const u8 = "https://plc.directory",
@@ -18,12 +19,12 @@ pub const DidResolver = struct {
     pub fn init(allocator: std.mem.Allocator) DidResolver {
         return .{
             .allocator = allocator,
-            .http_client = .{ .allocator = allocator },
+            .transport = HttpTransport.init(allocator),
         };
     }
 
     pub fn deinit(self: *DidResolver) void {
-        self.http_client.deinit();
+        self.transport.deinit();
     }
 
     /// resolve a did to its document
@@ -84,19 +85,14 @@ pub const DidResolver = struct {
 
     /// fetch and parse a did document from url
     fn fetchDidDocument(self: *DidResolver, url: []const u8) !DidDocument {
-        var aw: std.Io.Writer.Allocating = .init(self.allocator);
-        defer aw.deinit();
-
-        const result = self.http_client.fetch(.{
-            .location = .{ .url = url },
-            .response_writer = &aw.writer,
-        }) catch return error.DidResolutionFailed;
+        const result = self.transport.fetch(.{ .url = url }) catch return error.DidResolutionFailed;
+        defer self.allocator.free(result.body);
 
         if (result.status != .ok) {
             return error.DidResolutionFailed;
         }
 
-        return try DidDocument.parse(self.allocator, aw.toArrayList().items);
+        return try DidDocument.parse(self.allocator, result.body);
     }
 };
 

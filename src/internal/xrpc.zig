@@ -7,10 +7,11 @@
 
 const std = @import("std");
 const Nsid = @import("nsid.zig").Nsid;
+const HttpTransport = @import("transport.zig").HttpTransport;
 
 pub const XrpcClient = struct {
     allocator: std.mem.Allocator,
-    http_client: std.http.Client,
+    transport: HttpTransport,
 
     /// pds or appview host (e.g., "https://bsky.social")
     host: []const u8,
@@ -24,13 +25,13 @@ pub const XrpcClient = struct {
     pub fn init(allocator: std.mem.Allocator, host: []const u8) XrpcClient {
         return .{
             .allocator = allocator,
-            .http_client = .{ .allocator = allocator },
+            .transport = HttpTransport.init(allocator),
             .host = host,
         };
     }
 
     pub fn deinit(self: *XrpcClient) void {
-        self.http_client.deinit();
+        self.transport.deinit();
     }
 
     /// set bearer token for authenticated requests
@@ -85,35 +86,23 @@ pub const XrpcClient = struct {
     }
 
     fn doRequest(self: *XrpcClient, url: []const u8, body: ?[]const u8) !Response {
-        var aw: std.Io.Writer.Allocating = .init(self.allocator);
-        defer aw.deinit();
-
-        // disable gzip: zig stdlib flate.Decompress panics on certain streams
-        // https://github.com/ziglang/zig/issues/25021
-        var extra_headers: std.http.Client.Request.Headers = .{
-            .accept_encoding = .{ .override = "identity" },
-            .content_type = if (body != null) .{ .override = "application/json" } else .default,
-        };
         var auth_header_buf: [max_auth_header_len]u8 = undefined;
-        if (self.access_token) |token| {
-            const auth_value = try std.fmt.bufPrint(&auth_header_buf, "Bearer {s}", .{token});
-            extra_headers.authorization = .{ .override = auth_value };
-        }
+        const auth_value: ?[]const u8 = if (self.access_token) |token|
+            std.fmt.bufPrint(&auth_header_buf, "Bearer {s}", .{token}) catch null
+        else
+            null;
 
-        const result = self.http_client.fetch(.{
-            .location = .{ .url = url },
-            .response_writer = &aw.writer,
+        const result = try self.transport.fetch(.{
+            .url = url,
             .method = if (body != null) .POST else .GET,
             .payload = body,
-            .headers = extra_headers,
-        }) catch return error.RequestFailed;
-
-        const response_body = aw.toArrayList().items;
+            .authorization = auth_value,
+        });
 
         return .{
             .allocator = self.allocator,
             .status = result.status,
-            .body = try self.allocator.dupe(u8, response_body),
+            .body = result.body,
         };
     }
 

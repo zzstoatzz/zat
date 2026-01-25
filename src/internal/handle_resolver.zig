@@ -11,22 +11,23 @@
 const std = @import("std");
 const Handle = @import("handle.zig").Handle;
 const Did = @import("did.zig").Did;
+const HttpTransport = @import("transport.zig").HttpTransport;
 
 pub const HandleResolver = struct {
     allocator: std.mem.Allocator,
-    http_client: std.http.Client,
+    transport: HttpTransport,
     doh_endpoint: []const u8,
 
     pub fn init(allocator: std.mem.Allocator) HandleResolver {
         return .{
             .allocator = allocator,
-            .http_client = .{ .allocator = allocator },
+            .transport = HttpTransport.init(allocator),
             .doh_endpoint = "https://cloudflare-dns.com/dns-query",
         };
     }
 
     pub fn deinit(self: *HandleResolver) void {
-        self.http_client.deinit();
+        self.transport.deinit();
     }
 
     /// resolve a handle to a DID via HTTP well-known
@@ -47,20 +48,15 @@ pub const HandleResolver = struct {
         );
         defer self.allocator.free(url);
 
-        var aw: std.Io.Writer.Allocating = .init(self.allocator);
-        defer aw.deinit();
-
-        const result = self.http_client.fetch(.{
-            .location = .{ .url = url },
-            .response_writer = &aw.writer,
-        }) catch return error.HttpResolutionFailed;
+        const result = self.transport.fetch(.{ .url = url }) catch return error.HttpResolutionFailed;
+        defer self.allocator.free(result.body);
 
         if (result.status != .ok) {
             return error.HttpResolutionFailed;
         }
 
         // response body should be the DID as plain text
-        const did_str = std.mem.trim(u8, aw.toArrayList().items, &std.ascii.whitespace);
+        const did_str = std.mem.trim(u8, result.body, &std.ascii.whitespace);
 
         // validate it's a proper DID
         if (Did.parse(did_str) == null) {
@@ -86,26 +82,20 @@ pub const HandleResolver = struct {
         );
         defer self.allocator.free(url);
 
-        var aw: std.io.Writer.Allocating = .init(self.allocator);
-        defer aw.deinit();
-
-        const result = self.http_client.fetch(.{
-            .location = .{ .url = url },
-            .extra_headers = &.{
-                .{ .name = "accept", .value = "application/dns-json" },
-            },
-            .response_writer = &aw.writer,
+        const result = self.transport.fetch(.{
+            .url = url,
+            .accept = "application/dns-json",
         }) catch return error.DnsResolutionFailed;
+        defer self.allocator.free(result.body);
 
         if (result.status != .ok) {
             return error.DnsResolutionFailed;
         }
 
-        const response_body = aw.toArrayList().items;
         const parsed = std.json.parseFromSlice(
             DnsResponse,
             self.allocator,
-            response_body,
+            result.body,
             .{},
         ) catch return error.InvalidDnsResponse;
         defer parsed.deinit();
