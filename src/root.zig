@@ -32,3 +32,8 @@ const sync = @import("internal/sync.zig");
 pub const CommitAction = sync.CommitAction;
 pub const EventKind = sync.EventKind;
 pub const AccountStatus = sync.AccountStatus;
+
+// jetstream
+pub const jetstream = @import("internal/jetstream.zig");
+pub const JetstreamClient = jetstream.JetstreamClient;
+pub const JetstreamEvent = jetstream.Event;
