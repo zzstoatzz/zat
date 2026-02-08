@@ -37,3 +37,10 @@ pub const AccountStatus = sync.AccountStatus;
 pub const jetstream = @import("internal/jetstream.zig");
 pub const JetstreamClient = jetstream.JetstreamClient;
 pub const JetstreamEvent = jetstream.Event;
+
+// firehose (raw CBOR event stream)
+pub const cbor = @import("internal/cbor.zig");
+pub const car = @import("internal/car.zig");
+pub const firehose = @import("internal/firehose.zig");
+pub const FirehoseClient = firehose.FirehoseClient;
+pub const FirehoseEvent = firehose.Event;

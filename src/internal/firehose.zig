@@ -1,0 +1,669 @@
+//! firehose codec - com.atproto.sync.subscribeRepos
+//!
+//! encode and decode AT Protocol firehose events over WebSocket. messages are
+//! DAG-CBOR encoded (unlike jetstream, which is JSON). includes frame encoding/
+//! decoding, CAR block packing, and CID creation for records.
+//!
+//! wire format per frame:
+//!   [DAG-CBOR header: {op, t}] [DAG-CBOR payload: {seq, repo, ops, blocks, ...}]
+//!
+//! see: https://atproto.com/specs/event-stream
+
+const std = @import("std");
+const websocket = @import("websocket");
+const cbor = @import("cbor.zig");
+const car = @import("car.zig");
+const sync = @import("sync.zig");
+
+const mem = std.mem;
+const Allocator = mem.Allocator;
+const posix = std.posix;
+const log = std.log.scoped(.zat);
+
+pub const CommitAction = sync.CommitAction;
+pub const AccountStatus = sync.AccountStatus;
+
+pub const Options = struct {
+    host: []const u8 = "bsky.network",
+    cursor: ?i64 = null,
+    max_message_size: usize = 5 * 1024 * 1024, // 5MB — firehose frames can be large
+};
+
+/// decoded firehose event
+pub const Event = union(enum) {
+    commit: CommitEvent,
+    identity: IdentityEvent,
+    account: AccountEvent,
+    info: InfoEvent,
+
+    pub fn seq(self: Event) ?i64 {
+        return switch (self) {
+            .commit => |c| c.seq,
+            .identity => |i| i.seq,
+            .account => |a| a.seq,
+            .info => null,
+        };
+    }
+};
+
+pub const CommitEvent = struct {
+    seq: i64,
+    repo: []const u8, // DID
+    rev: ?[]const u8 = null,
+    time: ?[]const u8 = null,
+    ops: []const RepoOp,
+    too_big: bool = false,
+};
+
+pub const RepoOp = struct {
+    action: CommitAction,
+    collection: []const u8,
+    rkey: []const u8,
+    record: ?cbor.Value = null, // decoded DAG-CBOR record from CAR block
+};
+
+pub const IdentityEvent = struct {
+    seq: i64,
+    did: []const u8,
+    time: ?[]const u8 = null,
+    handle: ?[]const u8 = null,
+};
+
+pub const AccountEvent = struct {
+    seq: i64,
+    did: []const u8,
+    time: ?[]const u8 = null,
+    active: bool = true,
+    status: ?AccountStatus = null,
+};
+
+pub const InfoEvent = struct {
+    name: ?[]const u8 = null,
+    message: ?[]const u8 = null,
+};
+
+/// frame header from the wire
+const FrameHeader = struct {
+    op: i64,
+    t: ?[]const u8 = null,
+};
+
+pub const FrameOp = enum(i64) {
+    message = 1,
+    err = -1,
+};
+
+pub const DecodeError = error{
+    InvalidFrame,
+    InvalidHeader,
+    UnexpectedEof,
+    MissingField,
+    UnknownOp,
+    UnknownEventType,
+} || cbor.DecodeError || car.CarError;
+
+/// decode a raw WebSocket binary frame into a firehose Event
+pub fn decodeFrame(allocator: Allocator, data: []const u8) DecodeError!Event {
+    // frame = [CBOR header] [CBOR payload] concatenated
+    const header_result = try cbor.decode(allocator, data);
+    const header_val = header_result.value;
+    const payload_data = data[header_result.consumed..];
+
+    // parse header
+    const op = header_val.getInt("op") orelse return error.InvalidHeader;
+    if (op == -1) return error.UnknownOp; // error frame
+
+    const t = header_val.getString("t") orelse return error.InvalidHeader;
+
+    // decode payload
+    const payload = try cbor.decodeAll(allocator, payload_data);
+
+    if (mem.eql(u8, t, "#commit")) {
+        return try decodeCommit(allocator, payload);
+    } else if (mem.eql(u8, t, "#identity")) {
+        return decodeIdentity(payload);
+    } else if (mem.eql(u8, t, "#account")) {
+        return decodeAccount(payload);
+    } else if (mem.eql(u8, t, "#info")) {
+        return .{ .info = .{
+            .name = payload.getString("name"),
+            .message = payload.getString("message"),
+        } };
+    }
+
+    return error.UnknownEventType;
+}
+
+fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
+    const seq_val = payload.getInt("seq") orelse return error.MissingField;
+    const repo = payload.getString("repo") orelse return error.MissingField;
+
+    // parse CAR blocks
+    const blocks_bytes = payload.getBytes("blocks");
+    var parsed_car: ?car.Car = null;
+    if (blocks_bytes) |b| {
+        parsed_car = car.read(allocator, b) catch null;
+    }
+
+    // parse ops
+    const ops_array = payload.getArray("ops");
+    var ops: std.ArrayList(RepoOp) = .{};
+
+    if (ops_array) |op_values| {
+        for (op_values) |op_val| {
+            const action_str = op_val.getString("action") orelse continue;
+            const action = CommitAction.parse(action_str) orelse continue;
+            const path = op_val.getString("path") orelse continue;
+
+            // split path into collection/rkey
+            const slash = mem.indexOfScalar(u8, path, '/') orelse continue;
+            const collection = path[0..slash];
+            const rkey = path[slash + 1 ..];
+
+            // look up record from CAR blocks via CID
+            var record: ?cbor.Value = null;
+            if (parsed_car) |c| {
+                if (op_val.get("cid")) |cid_val| {
+                    switch (cid_val) {
+                        .cid => |cid| {
+                            if (car.findBlock(c, cid.raw)) |block_data| {
+                                record = cbor.decodeAll(allocator, block_data) catch null;
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            }
+
+            try ops.append(allocator, .{
+                .action = action,
+                .collection = collection,
+                .rkey = rkey,
+                .record = record,
+            });
+        }
+    }
+
+    return .{ .commit = .{
+        .seq = seq_val,
+        .repo = repo,
+        .rev = payload.getString("rev"),
+        .time = payload.getString("time"),
+        .ops = try ops.toOwnedSlice(allocator),
+        .too_big = payload.getBool("tooBig") orelse false,
+    } };
+}
+
+fn decodeIdentity(payload: cbor.Value) DecodeError!Event {
+    return .{ .identity = .{
+        .seq = payload.getInt("seq") orelse return error.MissingField,
+        .did = payload.getString("did") orelse return error.MissingField,
+        .time = payload.getString("time"),
+        .handle = payload.getString("handle"),
+    } };
+}
+
+fn decodeAccount(payload: cbor.Value) DecodeError!Event {
+    const status_str = payload.getString("status");
+    return .{ .account = .{
+        .seq = payload.getInt("seq") orelse return error.MissingField,
+        .did = payload.getString("did") orelse return error.MissingField,
+        .time = payload.getString("time"),
+        .active = payload.getBool("active") orelse true,
+        .status = if (status_str) |s| AccountStatus.parse(s) else null,
+    } };
+}
+
+// === encoder ===
+
+/// encode a firehose Event into a wire frame: [DAG-CBOR header] [DAG-CBOR payload]
+pub fn encodeFrame(allocator: Allocator, event: Event) ![]u8 {
+    var list: std.ArrayList(u8) = .{};
+    errdefer list.deinit(allocator);
+    const writer = list.writer(allocator);
+
+    const tag = switch (event) {
+        .commit => "#commit",
+        .identity => "#identity",
+        .account => "#account",
+        .info => "#info",
+    };
+
+    // encode header: {op: 1, t: "#..."}
+    const header: cbor.Value = .{ .map = &.{
+        .{ .key = "op", .value = .{ .unsigned = 1 } },
+        .{ .key = "t", .value = .{ .text = tag } },
+    } };
+    try cbor.encode(allocator, writer, header);
+
+    // encode payload based on event type
+    switch (event) {
+        .commit => |c| try encodeCommitPayload(allocator, writer, c),
+        .identity => |i| try encodeIdentityPayload(allocator, writer, i),
+        .account => |a| try encodeAccountPayload(allocator, writer, a),
+        .info => |inf| try encodeInfoPayload(allocator, writer, inf),
+    }
+
+    return try list.toOwnedSlice(allocator);
+}
+
+fn encodeCommitPayload(allocator: Allocator, writer: anytype, commit: CommitEvent) !void {
+    // build ops array and CAR blocks simultaneously
+    var op_values: std.ArrayList(cbor.Value) = .{};
+    defer op_values.deinit(allocator);
+    var car_blocks: std.ArrayList(car.Block) = .{};
+    defer car_blocks.deinit(allocator);
+    var root_cids: std.ArrayList(cbor.Cid) = .{};
+    defer root_cids.deinit(allocator);
+
+    for (commit.ops) |op| {
+        const action_str: []const u8 = @tagName(op.action);
+        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ op.collection, op.rkey });
+
+        if (op.record) |record| {
+            // encode record, create CID, add to CAR blocks
+            const record_bytes = try cbor.encodeAlloc(allocator, record);
+            const cid = try cbor.Cid.forDagCbor(allocator, record_bytes);
+
+            try car_blocks.append(allocator, .{
+                .cid_raw = cid.raw,
+                .data = record_bytes,
+            });
+
+            if (root_cids.items.len == 0) {
+                try root_cids.append(allocator, cid);
+            }
+
+            try op_values.append(allocator, .{ .map = @constCast(&[_]cbor.Value.MapEntry{
+                .{ .key = "action", .value = .{ .text = action_str } },
+                .{ .key = "cid", .value = .{ .cid = cid } },
+                .{ .key = "path", .value = .{ .text = path } },
+            }) });
+        } else {
+            try op_values.append(allocator, .{ .map = @constCast(&[_]cbor.Value.MapEntry{
+                .{ .key = "action", .value = .{ .text = action_str } },
+                .{ .key = "path", .value = .{ .text = path } },
+            }) });
+        }
+    }
+
+    // build CAR file from blocks
+    const car_data = car.Car{
+        .roots = root_cids.items,
+        .blocks = car_blocks.items,
+    };
+    const blocks_bytes = try car.writeAlloc(allocator, car_data);
+
+    // build payload entries
+    var entries: std.ArrayList(cbor.Value.MapEntry) = .{};
+    defer entries.deinit(allocator);
+
+    if (blocks_bytes.len > 0) {
+        try entries.append(allocator, .{ .key = "blocks", .value = .{ .bytes = blocks_bytes } });
+    }
+    try entries.append(allocator, .{ .key = "ops", .value = .{ .array = op_values.items } });
+    try entries.append(allocator, .{ .key = "repo", .value = .{ .text = commit.repo } });
+    if (commit.rev) |rev| {
+        try entries.append(allocator, .{ .key = "rev", .value = .{ .text = rev } });
+    }
+    try entries.append(allocator, .{ .key = "seq", .value = .{ .unsigned = @intCast(commit.seq) } });
+    if (commit.time) |t| {
+        try entries.append(allocator, .{ .key = "time", .value = .{ .text = t } });
+    }
+    if (commit.too_big) {
+        try entries.append(allocator, .{ .key = "tooBig", .value = .{ .boolean = true } });
+    }
+
+    try cbor.encode(allocator, writer, .{ .map = entries.items });
+}
+
+fn encodeIdentityPayload(allocator: Allocator, writer: anytype, identity: IdentityEvent) !void {
+    var entries: std.ArrayList(cbor.Value.MapEntry) = .{};
+    defer entries.deinit(allocator);
+
+    try entries.append(allocator, .{ .key = "did", .value = .{ .text = identity.did } });
+    if (identity.handle) |h| {
+        try entries.append(allocator, .{ .key = "handle", .value = .{ .text = h } });
+    }
+    try entries.append(allocator, .{ .key = "seq", .value = .{ .unsigned = @intCast(identity.seq) } });
+    if (identity.time) |t| {
+        try entries.append(allocator, .{ .key = "time", .value = .{ .text = t } });
+    }
+
+    try cbor.encode(allocator, writer, .{ .map = entries.items });
+}
+
+fn encodeAccountPayload(allocator: Allocator, writer: anytype, account: AccountEvent) !void {
+    var entries: std.ArrayList(cbor.Value.MapEntry) = .{};
+    defer entries.deinit(allocator);
+
+    if (!account.active) {
+        try entries.append(allocator, .{ .key = "active", .value = .{ .boolean = false } });
+    }
+    try entries.append(allocator, .{ .key = "did", .value = .{ .text = account.did } });
+    try entries.append(allocator, .{ .key = "seq", .value = .{ .unsigned = @intCast(account.seq) } });
+    if (account.status) |s| {
+        try entries.append(allocator, .{ .key = "status", .value = .{ .text = @tagName(s) } });
+    }
+    if (account.time) |t| {
+        try entries.append(allocator, .{ .key = "time", .value = .{ .text = t } });
+    }
+
+    try cbor.encode(allocator, writer, .{ .map = entries.items });
+}
+
+fn encodeInfoPayload(allocator: Allocator, writer: anytype, info: InfoEvent) !void {
+    var entries: std.ArrayList(cbor.Value.MapEntry) = .{};
+    defer entries.deinit(allocator);
+
+    if (info.message) |m| {
+        try entries.append(allocator, .{ .key = "message", .value = .{ .text = m } });
+    }
+    if (info.name) |n| {
+        try entries.append(allocator, .{ .key = "name", .value = .{ .text = n } });
+    }
+
+    try cbor.encode(allocator, writer, .{ .map = entries.items });
+}
+
+pub const FirehoseClient = struct {
+    allocator: Allocator,
+    options: Options,
+    last_seq: ?i64 = null,
+
+    pub fn init(allocator: Allocator, options: Options) FirehoseClient {
+        return .{
+            .allocator = allocator,
+            .options = options,
+            .last_seq = if (options.cursor) |c| c else null,
+        };
+    }
+
+    pub fn deinit(_: *FirehoseClient) void {}
+
+    /// subscribe with a user-provided handler.
+    /// handler must implement: fn onEvent(*@TypeOf(handler), Event) void
+    /// optional: fn onError(*@TypeOf(handler), anyerror) void
+    /// blocks forever — reconnects with exponential backoff on disconnect.
+    pub fn subscribe(self: *FirehoseClient, handler: anytype) void {
+        var backoff: u64 = 1;
+        const max_backoff: u64 = 60;
+
+        while (true) {
+            self.connectAndRead(handler) catch |err| {
+                if (comptime @hasDecl(@TypeOf(handler.*), "onError")) {
+                    handler.onError(err);
+                } else {
+                    log.err("firehose error: {s}, reconnecting in {d}s...", .{ @errorName(err), backoff });
+                }
+            };
+            posix.nanosleep(backoff, 0);
+            backoff = @min(backoff * 2, max_backoff);
+        }
+    }
+
+    fn connectAndRead(self: *FirehoseClient, handler: anytype) !void {
+        var path_buf: [256]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&path_buf);
+        const writer = stream.writer();
+
+        try writer.writeAll("/xrpc/com.atproto.sync.subscribeRepos");
+        if (self.last_seq) |cursor| {
+            try writer.print("?cursor={d}", .{cursor});
+        }
+        const path = stream.getWritten();
+
+        log.info("connecting to wss://{s}{s}", .{ self.options.host, path });
+
+        var client = try websocket.Client.init(self.allocator, .{
+            .host = self.options.host,
+            .port = 443,
+            .tls = true,
+            .max_size = self.options.max_message_size,
+        });
+        defer client.deinit();
+
+        var host_header_buf: [256]u8 = undefined;
+        const host_header = std.fmt.bufPrint(&host_header_buf, "Host: {s}\r\n", .{self.options.host}) catch self.options.host;
+
+        try client.handshake(path, .{ .headers = host_header });
+
+        log.info("firehose connected", .{});
+
+        var ws_handler = WsHandler(@TypeOf(handler.*)){
+            .allocator = self.allocator,
+            .handler = handler,
+            .client_state = self,
+        };
+        try client.readLoop(&ws_handler);
+    }
+};
+
+fn WsHandler(comptime H: type) type {
+    return struct {
+        allocator: Allocator,
+        handler: *H,
+        client_state: *FirehoseClient,
+
+        const Self = @This();
+
+        pub fn serverMessage(self: *Self, data: []const u8) !void {
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+
+            const event = decodeFrame(arena.allocator(), data) catch |err| {
+                log.debug("frame decode error: {s}", .{@errorName(err)});
+                return;
+            };
+
+            if (event.seq()) |s| {
+                self.client_state.last_seq = s;
+            }
+
+            self.handler.onEvent(event);
+        }
+
+        pub fn close(_: *Self) void {
+            log.info("firehose connection closed", .{});
+        }
+    };
+}
+
+// === tests ===
+
+test "decode frame header" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // simulate a frame: header {op: 1, t: "#info"} + payload {name: "OutdatedCursor"}
+    const header_bytes = [_]u8{
+        0xa2, // map(2)
+        0x62, 'o', 'p', 0x01, // "op": 1
+        0x61, 't', 0x65, '#', 'i', 'n', 'f', 'o', // "t": "#info"
+    };
+    const payload_bytes = [_]u8{
+        0xa1, // map(1)
+        0x64, 'n', 'a', 'm', 'e', // "name"
+        0x6e, 'O', 'u', 't', 'd', 'a', 't', 'e', 'd', 'C', 'u', 'r', 's', 'o', 'r', // "OutdatedCursor"
+    };
+
+    var frame: [header_bytes.len + payload_bytes.len]u8 = undefined;
+    @memcpy(frame[0..header_bytes.len], &header_bytes);
+    @memcpy(frame[header_bytes.len..], &payload_bytes);
+
+    const event = try decodeFrame(alloc, &frame);
+    const info = event.info;
+    try std.testing.expectEqualStrings("OutdatedCursor", info.name.?);
+}
+
+test "decode identity frame" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // header: {op: 1, t: "#identity"}
+    const header_bytes = [_]u8{
+        0xa2, // map(2)
+        0x62, 'o', 'p', 0x01, // "op": 1
+        0x61, 't', 0x69, '#', 'i', 'd', 'e', 'n', 't', 'i', 't', 'y', // "t": "#identity"
+    };
+    // payload: {seq: 42, did: "did:plc:test"}
+    const payload_bytes = [_]u8{
+        0xa2, // map(2)
+        0x63, 's', 'e', 'q', 0x18, 42, // "seq": 42
+        0x63, 'd', 'i', 'd', 0x6c, 'd', 'i', 'd', ':', 'p', 'l', 'c', ':', 't', 'e', 's', 't', // "did": "did:plc:test"
+    };
+
+    var frame: [header_bytes.len + payload_bytes.len]u8 = undefined;
+    @memcpy(frame[0..header_bytes.len], &header_bytes);
+    @memcpy(frame[header_bytes.len..], &payload_bytes);
+
+    const event = try decodeFrame(alloc, &frame);
+    const identity = event.identity;
+    try std.testing.expectEqual(@as(i64, 42), identity.seq);
+    try std.testing.expectEqualStrings("did:plc:test", identity.did);
+}
+
+test "Event.seq works" {
+    const info_event = Event{ .info = .{ .name = "test" } };
+    try std.testing.expect(info_event.seq() == null);
+
+    const identity_event = Event{ .identity = .{
+        .seq = 42,
+        .did = "did:plc:test",
+    } };
+    try std.testing.expectEqual(@as(i64, 42), identity_event.seq().?);
+}
+
+// === encoder tests ===
+
+test "encode → decode info frame" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const original = Event{ .info = .{
+        .name = "OutdatedCursor",
+        .message = "cursor is behind",
+    } };
+
+    const frame = try encodeFrame(alloc, original);
+    const decoded = try decodeFrame(alloc, frame);
+
+    try std.testing.expectEqualStrings("OutdatedCursor", decoded.info.name.?);
+    try std.testing.expectEqualStrings("cursor is behind", decoded.info.message.?);
+}
+
+test "encode → decode identity frame" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const original = Event{ .identity = .{
+        .seq = 42,
+        .did = "did:plc:test123",
+        .handle = "alice.bsky.social",
+        .time = "2024-01-15T10:30:00Z",
+    } };
+
+    const frame = try encodeFrame(alloc, original);
+    const decoded = try decodeFrame(alloc, frame);
+
+    const id = decoded.identity;
+    try std.testing.expectEqual(@as(i64, 42), id.seq);
+    try std.testing.expectEqualStrings("did:plc:test123", id.did);
+    try std.testing.expectEqualStrings("alice.bsky.social", id.handle.?);
+    try std.testing.expectEqualStrings("2024-01-15T10:30:00Z", id.time.?);
+}
+
+test "encode → decode account frame" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const original = Event{ .account = .{
+        .seq = 100,
+        .did = "did:plc:suspended",
+        .active = false,
+        .status = .suspended,
+        .time = "2024-01-15T10:30:00Z",
+    } };
+
+    const frame = try encodeFrame(alloc, original);
+    const decoded = try decodeFrame(alloc, frame);
+
+    const acct = decoded.account;
+    try std.testing.expectEqual(@as(i64, 100), acct.seq);
+    try std.testing.expectEqualStrings("did:plc:suspended", acct.did);
+    try std.testing.expectEqual(false, acct.active);
+    try std.testing.expectEqual(AccountStatus.suspended, acct.status.?);
+}
+
+test "encode → decode commit frame with record" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const record: cbor.Value = .{ .map = &.{
+        .{ .key = "$type", .value = .{ .text = "app.bsky.feed.post" } },
+        .{ .key = "text", .value = .{ .text = "hello firehose" } },
+    } };
+
+    const original = Event{ .commit = .{
+        .seq = 999,
+        .repo = "did:plc:poster",
+        .rev = "abc123",
+        .time = "2024-01-15T10:30:00Z",
+        .ops = &.{.{
+            .action = .create,
+            .collection = "app.bsky.feed.post",
+            .rkey = "3k2abc",
+            .record = record,
+        }},
+    } };
+
+    const frame = try encodeFrame(alloc, original);
+    const decoded = try decodeFrame(alloc, frame);
+
+    const commit = decoded.commit;
+    try std.testing.expectEqual(@as(i64, 999), commit.seq);
+    try std.testing.expectEqualStrings("did:plc:poster", commit.repo);
+    try std.testing.expectEqualStrings("abc123", commit.rev.?);
+    try std.testing.expectEqual(@as(usize, 1), commit.ops.len);
+
+    const op = commit.ops[0];
+    try std.testing.expectEqual(CommitAction.create, op.action);
+    try std.testing.expectEqualStrings("app.bsky.feed.post", op.collection);
+    try std.testing.expectEqualStrings("3k2abc", op.rkey);
+
+    // record should be decoded from the CAR blocks
+    const rec = op.record.?;
+    try std.testing.expectEqualStrings("hello firehose", rec.getString("text").?);
+    try std.testing.expectEqualStrings("app.bsky.feed.post", rec.getString("$type").?);
+}
+
+test "encode → decode commit with delete (no record)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const original = Event{ .commit = .{
+        .seq = 500,
+        .repo = "did:plc:deleter",
+        .ops = &.{.{
+            .action = .delete,
+            .collection = "app.bsky.feed.post",
+            .rkey = "abc123",
+            .record = null,
+        }},
+    } };
+
+    const frame = try encodeFrame(alloc, original);
+    const decoded = try decodeFrame(alloc, frame);
+
+    try std.testing.expectEqual(@as(i64, 500), decoded.commit.seq);
+    try std.testing.expectEqual(@as(usize, 1), decoded.commit.ops.len);
+    try std.testing.expectEqual(CommitAction.delete, decoded.commit.ops[0].action);
+    try std.testing.expect(decoded.commit.ops[0].record == null);
+}
