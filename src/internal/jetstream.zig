@@ -31,6 +31,12 @@ pub const Event = union(enum) {
     commit: CommitEvent,
     identity: IdentityEvent,
     account: AccountEvent,
+
+    pub fn timeUs(self: Event) i64 {
+        return switch (self) {
+            inline else => |e| e.time_us,
+        };
+    }
 };
 
 pub const CommitEvent = struct {
@@ -61,6 +67,53 @@ pub const AccountEvent = struct {
     time: ?[]const u8 = null,
 };
 
+/// parse a raw JSON payload into a typed Event.
+/// allocator is used for JSON structural data (ObjectMaps for record fields).
+/// string slices in the returned Event reference the source `payload` bytes.
+/// keep both `payload` and allocator-owned memory alive while using the Event.
+pub fn parseEvent(allocator: Allocator, payload: []const u8) !Event {
+    const parsed = try json.parseFromSlice(json.Value, allocator, payload, .{});
+    const root = parsed.value;
+
+    const kind_str = json_helpers.getString(root, "kind") orelse return error.MissingKind;
+    const did = json_helpers.getString(root, "did") orelse return error.MissingDid;
+    const time_us = json_helpers.getInt(root, "time_us") orelse return error.MissingTimeUs;
+
+    if (mem.eql(u8, kind_str, "commit")) {
+        const op_str = json_helpers.getString(root, "commit.operation") orelse return error.MissingOperation;
+        return .{ .commit = .{
+            .did = did,
+            .time_us = time_us,
+            .operation = CommitAction.parse(op_str) orelse return error.UnknownOperation,
+            .collection = json_helpers.getString(root, "commit.collection") orelse return error.MissingCollection,
+            .rkey = json_helpers.getString(root, "commit.rkey") orelse return error.MissingRkey,
+            .rev = json_helpers.getString(root, "commit.rev"),
+            .cid = json_helpers.getString(root, "commit.cid"),
+            .record = json_helpers.getPath(root, "commit.record"),
+        } };
+    } else if (mem.eql(u8, kind_str, "identity")) {
+        return .{ .identity = .{
+            .did = did,
+            .time_us = time_us,
+            .handle = json_helpers.getString(root, "identity.handle"),
+            .seq = json_helpers.getInt(root, "identity.seq"),
+            .time = json_helpers.getString(root, "identity.time"),
+        } };
+    } else if (mem.eql(u8, kind_str, "account")) {
+        const status_str = json_helpers.getString(root, "account.status");
+        return .{ .account = .{
+            .did = did,
+            .time_us = time_us,
+            .active = json_helpers.getBool(root, "account.active") orelse true,
+            .status = if (status_str) |s| AccountStatus.parse(s) else null,
+            .seq = json_helpers.getInt(root, "account.seq"),
+            .time = json_helpers.getString(root, "account.time"),
+        } };
+    }
+
+    return error.UnknownKind;
+}
+
 pub const JetstreamClient = struct {
     allocator: Allocator,
     options: Options,
@@ -79,14 +132,14 @@ pub const JetstreamClient = struct {
     /// subscribe with a user-provided handler.
     /// handler must implement: fn onEvent(*@TypeOf(handler), Event) void
     /// optional: fn onError(*@TypeOf(handler), anyerror) void
-    /// blocks until deinit — reconnects with exponential backoff on disconnect.
+    /// blocks forever — reconnects with exponential backoff on disconnect.
     pub fn subscribe(self: *JetstreamClient, handler: anytype) void {
         var backoff: u64 = 1;
         const max_backoff: u64 = 60;
 
         while (true) {
             self.connectAndRead(handler) catch |err| {
-                if (comptime hasOnError(@TypeOf(handler.*))) {
+                if (comptime @hasDecl(@TypeOf(handler.*), "onError")) {
                     handler.onError(err);
                 } else {
                     log.err("jetstream error: {s}, reconnecting in {d}s...", .{ @errorName(err), backoff });
@@ -155,10 +208,6 @@ pub const JetstreamClient = struct {
 
         return stream.getWritten();
     }
-
-    fn hasOnError(comptime T: type) bool {
-        return @hasDecl(T, "onError");
-    }
 };
 
 fn WsHandler(comptime H: type) type {
@@ -170,304 +219,22 @@ fn WsHandler(comptime H: type) type {
         const Self = @This();
 
         pub fn serverMessage(self: *Self, data: []const u8) !void {
-            self.processMessage(data) catch |err| {
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+
+            const event = parseEvent(arena.allocator(), data) catch |err| {
                 log.debug("message parse error: {s}", .{@errorName(err)});
+                return;
             };
+
+            self.client_state.last_time_us = event.timeUs();
+            self.handler.onEvent(event);
         }
 
         pub fn close(_: *Self) void {
             log.info("jetstream connection closed", .{});
         }
-
-        fn processMessage(self: *Self, payload: []const u8) !void {
-            var arena = std.heap.ArenaAllocator.init(self.allocator);
-            defer arena.deinit();
-            const alloc = arena.allocator();
-
-            const parsed = try json.parseFromSlice(json.Value, alloc, payload, .{});
-            const root = parsed.value;
-
-            const kind_str = json_helpers.getString(root, "kind") orelse return;
-            const did = json_helpers.getString(root, "did") orelse return;
-            const time_us = json_helpers.getInt(root, "time_us") orelse return;
-
-            // track cursor
-            self.client_state.last_time_us = time_us;
-
-            if (mem.eql(u8, kind_str, "commit")) {
-                const commit = switch (root) {
-                    .object => |obj| obj.get("commit") orelse return,
-                    else => return,
-                };
-                const commit_obj = switch (commit) {
-                    .object => |obj| obj,
-                    else => return,
-                };
-
-                const operation_str = switch (commit_obj.get("operation") orelse return) {
-                    .string => |s| s,
-                    else => return,
-                };
-                const operation = CommitAction.parse(operation_str) orelse return;
-
-                const collection = switch (commit_obj.get("collection") orelse return) {
-                    .string => |s| s,
-                    else => return,
-                };
-                const rkey = switch (commit_obj.get("rkey") orelse return) {
-                    .string => |s| s,
-                    else => return,
-                };
-
-                const rev = blk: {
-                    const v = commit_obj.get("rev") orelse break :blk null;
-                    break :blk switch (v) {
-                        .string => |s| @as(?[]const u8, s),
-                        else => null,
-                    };
-                };
-
-                const cid = blk: {
-                    const v = commit_obj.get("cid") orelse break :blk null;
-                    break :blk switch (v) {
-                        .string => |s| @as(?[]const u8, s),
-                        else => null,
-                    };
-                };
-
-                const record = commit_obj.get("record");
-
-                self.handler.onEvent(.{ .commit = .{
-                    .did = did,
-                    .time_us = time_us,
-                    .rev = rev,
-                    .operation = operation,
-                    .collection = collection,
-                    .rkey = rkey,
-                    .record = record,
-                    .cid = cid,
-                } });
-            } else if (mem.eql(u8, kind_str, "identity")) {
-                const identity = switch (root) {
-                    .object => |obj| obj.get("identity"),
-                    else => null,
-                };
-                const identity_obj = if (identity) |id| switch (id) {
-                    .object => |obj| obj,
-                    else => null,
-                } else null;
-
-                const handle = if (identity_obj) |obj| switch (obj.get("handle") orelse json.Value{ .null = {} }) {
-                    .string => |s| @as(?[]const u8, s),
-                    else => null,
-                } else null;
-
-                const seq = if (identity_obj) |obj| switch (obj.get("seq") orelse json.Value{ .null = {} }) {
-                    .integer => |i| @as(?i64, i),
-                    else => null,
-                } else null;
-
-                const time_val = if (identity_obj) |obj| switch (obj.get("time") orelse json.Value{ .null = {} }) {
-                    .string => |s| @as(?[]const u8, s),
-                    else => null,
-                } else null;
-
-                self.handler.onEvent(.{ .identity = .{
-                    .did = did,
-                    .time_us = time_us,
-                    .handle = handle,
-                    .seq = seq,
-                    .time = time_val,
-                } });
-            } else if (mem.eql(u8, kind_str, "account")) {
-                const account = switch (root) {
-                    .object => |obj| obj.get("account"),
-                    else => null,
-                };
-                const account_obj = if (account) |a| switch (a) {
-                    .object => |obj| obj,
-                    else => null,
-                } else null;
-
-                const active = if (account_obj) |obj| switch (obj.get("active") orelse json.Value{ .null = {} }) {
-                    .bool => |b| b,
-                    else => true,
-                } else true;
-
-                const status_val = if (account_obj) |obj| blk: {
-                    const v = obj.get("status") orelse break :blk null;
-                    break :blk switch (v) {
-                        .string => |s| AccountStatus.parse(s),
-                        else => null,
-                    };
-                } else null;
-
-                const seq = if (account_obj) |obj| switch (obj.get("seq") orelse json.Value{ .null = {} }) {
-                    .integer => |i| @as(?i64, i),
-                    else => null,
-                } else null;
-
-                const time_val = if (account_obj) |obj| switch (obj.get("time") orelse json.Value{ .null = {} }) {
-                    .string => |s| @as(?[]const u8, s),
-                    else => null,
-                } else null;
-
-                self.handler.onEvent(.{ .account = .{
-                    .did = did,
-                    .time_us = time_us,
-                    .active = active,
-                    .status = status_val,
-                    .seq = seq,
-                    .time = time_val,
-                } });
-            }
-            // unknown kinds are silently ignored
-        }
     };
-}
-
-// === parsing helpers (used by tests and internal parsing) ===
-
-/// parse a raw JSON message into an Event
-pub fn parseEvent(allocator: Allocator, payload: []const u8) !Event {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const parsed = try json.parseFromSlice(json.Value, alloc, payload, .{});
-    const root = parsed.value;
-
-    const kind_str = json_helpers.getString(root, "kind") orelse return error.MissingKind;
-    const did = json_helpers.getString(root, "did") orelse return error.MissingDid;
-    const time_us = json_helpers.getInt(root, "time_us") orelse return error.MissingTimeUs;
-
-    if (mem.eql(u8, kind_str, "commit")) {
-        const commit = switch (root) {
-            .object => |obj| obj.get("commit") orelse return error.MissingCommit,
-            else => return error.InvalidRoot,
-        };
-        const commit_obj = switch (commit) {
-            .object => |obj| obj,
-            else => return error.InvalidCommit,
-        };
-
-        const operation_str = switch (commit_obj.get("operation") orelse return error.MissingOperation) {
-            .string => |s| s,
-            else => return error.InvalidOperation,
-        };
-        const operation = CommitAction.parse(operation_str) orelse return error.UnknownOperation;
-
-        const collection = switch (commit_obj.get("collection") orelse return error.MissingCollection) {
-            .string => |s| s,
-            else => return error.InvalidCollection,
-        };
-        const rkey = switch (commit_obj.get("rkey") orelse return error.MissingRkey) {
-            .string => |s| s,
-            else => return error.InvalidRkey,
-        };
-
-        const rev = blk: {
-            const v = commit_obj.get("rev") orelse break :blk null;
-            break :blk switch (v) {
-                .string => |s| @as(?[]const u8, s),
-                else => null,
-            };
-        };
-
-        const cid = blk: {
-            const v = commit_obj.get("cid") orelse break :blk null;
-            break :blk switch (v) {
-                .string => |s| @as(?[]const u8, s),
-                else => null,
-            };
-        };
-
-        return .{ .commit = .{
-            .did = did,
-            .time_us = time_us,
-            .rev = rev,
-            .operation = operation,
-            .collection = collection,
-            .rkey = rkey,
-            .record = commit_obj.get("record"),
-            .cid = cid,
-        } };
-    } else if (mem.eql(u8, kind_str, "identity")) {
-        const identity = switch (root) {
-            .object => |obj| obj.get("identity"),
-            else => null,
-        };
-        const identity_obj = if (identity) |id| switch (id) {
-            .object => |obj| obj,
-            else => null,
-        } else null;
-
-        const handle = if (identity_obj) |obj| switch (obj.get("handle") orelse json.Value{ .null = {} }) {
-            .string => |s| @as(?[]const u8, s),
-            else => null,
-        } else null;
-
-        const seq = if (identity_obj) |obj| switch (obj.get("seq") orelse json.Value{ .null = {} }) {
-            .integer => |i| @as(?i64, i),
-            else => null,
-        } else null;
-
-        const time_val = if (identity_obj) |obj| switch (obj.get("time") orelse json.Value{ .null = {} }) {
-            .string => |s| @as(?[]const u8, s),
-            else => null,
-        } else null;
-
-        return .{ .identity = .{
-            .did = did,
-            .time_us = time_us,
-            .handle = handle,
-            .seq = seq,
-            .time = time_val,
-        } };
-    } else if (mem.eql(u8, kind_str, "account")) {
-        const account = switch (root) {
-            .object => |obj| obj.get("account"),
-            else => null,
-        };
-        const account_obj = if (account) |a| switch (a) {
-            .object => |obj| obj,
-            else => null,
-        } else null;
-
-        const active = if (account_obj) |obj| switch (obj.get("active") orelse json.Value{ .null = {} }) {
-            .bool => |b| b,
-            else => true,
-        } else true;
-
-        const status_val = if (account_obj) |obj| blk: {
-            const v = obj.get("status") orelse break :blk null;
-            break :blk switch (v) {
-                .string => |s| AccountStatus.parse(s),
-                else => null,
-            };
-        } else null;
-
-        const seq = if (account_obj) |obj| switch (obj.get("seq") orelse json.Value{ .null = {} }) {
-            .integer => |i| @as(?i64, i),
-            else => null,
-        } else null;
-
-        const time_val = if (account_obj) |obj| switch (obj.get("time") orelse json.Value{ .null = {} }) {
-            .string => |s| @as(?[]const u8, s),
-            else => null,
-        } else null;
-
-        return .{ .account = .{
-            .did = did,
-            .time_us = time_us,
-            .active = active,
-            .status = status_val,
-            .seq = seq,
-            .time = time_val,
-        } };
-    }
-
-    return error.UnknownKind;
 }
 
 // === tests ===
@@ -492,7 +259,10 @@ test "parse commit event" {
         \\}
     ;
 
-    const event = try parseEvent(std.testing.allocator, payload);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const event = try parseEvent(arena.allocator(), payload);
     const commit = event.commit;
 
     try std.testing.expectEqualStrings("did:plc:abc123", commit.did);
@@ -503,10 +273,7 @@ test "parse commit event" {
     try std.testing.expectEqualStrings("xyz789", commit.rkey);
     try std.testing.expectEqualStrings("bafyreitest", commit.cid.?);
     try std.testing.expect(commit.record != null);
-
-    // verify record contents via json helpers
-    const text = json_helpers.getString(commit.record.?, "text");
-    try std.testing.expectEqualStrings("hello world", text.?);
+    try std.testing.expectEqualStrings("hello world", json_helpers.getString(commit.record.?, "text").?);
 }
 
 test "parse identity event" {
@@ -523,7 +290,10 @@ test "parse identity event" {
         \\}
     ;
 
-    const event = try parseEvent(std.testing.allocator, payload);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const event = try parseEvent(arena.allocator(), payload);
     const identity = event.identity;
 
     try std.testing.expectEqualStrings("did:plc:abc123", identity.did);
@@ -548,7 +318,10 @@ test "parse account event" {
         \\}
     ;
 
-    const event = try parseEvent(std.testing.allocator, payload);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const event = try parseEvent(arena.allocator(), payload);
     const account = event.account;
 
     try std.testing.expectEqualStrings("did:plc:abc123", account.did);
@@ -568,8 +341,10 @@ test "parse unknown kind returns error" {
         \\}
     ;
 
-    const result = parseEvent(std.testing.allocator, payload);
-    try std.testing.expectError(error.UnknownKind, result);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expectError(error.UnknownKind, parseEvent(arena.allocator(), payload));
 }
 
 test "parse commit with unknown operation returns error" {
@@ -586,12 +361,13 @@ test "parse commit with unknown operation returns error" {
         \\}
     ;
 
-    const result = parseEvent(std.testing.allocator, payload);
-    try std.testing.expectError(error.UnknownOperation, result);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expectError(error.UnknownOperation, parseEvent(arena.allocator(), payload));
 }
 
 test "cursor tracking via time_us" {
-    // verify that parseEvent extracts time_us correctly for cursor resumption
     const payloads = [_][]const u8{
         \\{"did":"did:plc:a","time_us":100,"kind":"commit","commit":{"operation":"create","collection":"app.bsky.feed.post","rkey":"1"}}
         ,
@@ -599,18 +375,33 @@ test "cursor tracking via time_us" {
         ,
     };
 
-    for (payloads) |payload| {
-        const event = try parseEvent(std.testing.allocator, payload);
-        switch (event) {
-            .commit => |c| try std.testing.expect(c.time_us > 0),
-            else => unreachable,
-        }
-    }
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
 
-    // verify second event has higher time_us
-    const e1 = try parseEvent(std.testing.allocator, payloads[0]);
-    const e2 = try parseEvent(std.testing.allocator, payloads[1]);
-    try std.testing.expect(e2.commit.time_us > e1.commit.time_us);
+    const e1 = try parseEvent(arena.allocator(), payloads[0]);
+    const e2 = try parseEvent(arena.allocator(), payloads[1]);
+
+    try std.testing.expect(e1.timeUs() > 0);
+    try std.testing.expect(e2.timeUs() > e1.timeUs());
+}
+
+test "Event.timeUs works for all variants" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const commit = try parseEvent(arena.allocator(),
+        \\{"did":"did:plc:a","time_us":100,"kind":"commit","commit":{"operation":"create","collection":"x","rkey":"1"}}
+    );
+    const identity = try parseEvent(arena.allocator(),
+        \\{"did":"did:plc:a","time_us":200,"kind":"identity","identity":{}}
+    );
+    const account = try parseEvent(arena.allocator(),
+        \\{"did":"did:plc:a","time_us":300,"kind":"account","account":{"active":true}}
+    );
+
+    try std.testing.expectEqual(@as(i64, 100), commit.timeUs());
+    try std.testing.expectEqual(@as(i64, 200), identity.timeUs());
+    try std.testing.expectEqual(@as(i64, 300), account.timeUs());
 }
 
 test "build subscribe path" {
@@ -660,8 +451,10 @@ test "parse commit event with delete operation" {
         \\}
     ;
 
-    const event = try parseEvent(std.testing.allocator, payload);
-    const commit = event.commit;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const commit = (try parseEvent(arena.allocator(), payload)).commit;
 
     try std.testing.expectEqual(CommitAction.delete, commit.operation);
     try std.testing.expect(commit.record == null);
@@ -679,8 +472,10 @@ test "parse identity event with minimal fields" {
         \\}
     ;
 
-    const event = try parseEvent(std.testing.allocator, payload);
-    const identity = event.identity;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const identity = (try parseEvent(arena.allocator(), payload)).identity;
 
     try std.testing.expectEqualStrings("did:plc:abc123", identity.did);
     try std.testing.expect(identity.handle == null);
@@ -696,6 +491,8 @@ test "parse missing did returns error" {
         \\}
     ;
 
-    const result = parseEvent(std.testing.allocator, payload);
-    try std.testing.expectError(error.MissingDid, result);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expectError(error.MissingDid, parseEvent(arena.allocator(), payload));
 }
