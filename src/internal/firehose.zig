@@ -49,9 +49,12 @@ pub const Event = union(enum) {
 pub const CommitEvent = struct {
     seq: i64,
     repo: []const u8, // DID
-    rev: ?[]const u8 = null,
-    time: ?[]const u8 = null,
+    rev: []const u8, // TID — revision of the commit
+    time: []const u8, // datetime — when event was received
+    since: ?[]const u8 = null, // TID — rev of preceding commit (null = full repo export)
+    commit: ?cbor.Cid = null, // CID of the commit object
     ops: []const RepoOp,
+    blobs: []const cbor.Cid = &.{}, // new blobs referenced by records in this commit
     too_big: bool = false,
 };
 
@@ -59,20 +62,21 @@ pub const RepoOp = struct {
     action: CommitAction,
     collection: []const u8,
     rkey: []const u8,
+    cid: ?cbor.Cid = null, // CID of the record (null for deletes)
     record: ?cbor.Value = null, // decoded DAG-CBOR record from CAR block
 };
 
 pub const IdentityEvent = struct {
     seq: i64,
     did: []const u8,
-    time: ?[]const u8 = null,
+    time: []const u8, // datetime — when event was received
     handle: ?[]const u8 = null,
 };
 
 pub const AccountEvent = struct {
     seq: i64,
     did: []const u8,
-    time: ?[]const u8 = null,
+    time: []const u8, // datetime — when event was received
     active: bool = true,
     status: ?AccountStatus = null,
 };
@@ -137,6 +141,28 @@ pub fn decodeFrame(allocator: Allocator, data: []const u8) DecodeError!Event {
 fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
     const seq_val = payload.getInt("seq") orelse return error.MissingField;
     const repo = payload.getString("repo") orelse return error.MissingField;
+    const rev = payload.getString("rev") orelse return error.MissingField;
+    const time = payload.getString("time") orelse return error.MissingField;
+
+    // parse commit CID
+    var commit_cid: ?cbor.Cid = null;
+    if (payload.get("commit")) |commit_val| {
+        switch (commit_val) {
+            .cid => |c| commit_cid = c,
+            else => {},
+        }
+    }
+
+    // parse blobs array (array of CID links)
+    var blobs: std.ArrayList(cbor.Cid) = .{};
+    if (payload.getArray("blobs")) |blob_values| {
+        for (blob_values) |blob_val| {
+            switch (blob_val) {
+                .cid => |c| try blobs.append(allocator, c),
+                else => {},
+            }
+        }
+    }
 
     // parse CAR blocks
     const blocks_bytes = payload.getBytes("blocks");
@@ -160,18 +186,20 @@ fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
             const collection = path[0..slash];
             const rkey = path[slash + 1 ..];
 
-            // look up record from CAR blocks via CID
+            // extract CID from op and look up record from CAR blocks
+            var op_cid: ?cbor.Cid = null;
             var record: ?cbor.Value = null;
-            if (parsed_car) |c| {
-                if (op_val.get("cid")) |cid_val| {
-                    switch (cid_val) {
-                        .cid => |cid| {
+            if (op_val.get("cid")) |cid_val| {
+                switch (cid_val) {
+                    .cid => |cid| {
+                        op_cid = cid;
+                        if (parsed_car) |c| {
                             if (car.findBlock(c, cid.raw)) |block_data| {
                                 record = cbor.decodeAll(allocator, block_data) catch null;
                             }
-                        },
-                        else => {},
-                    }
+                        }
+                    },
+                    else => {},
                 }
             }
 
@@ -179,6 +207,7 @@ fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
                 .action = action,
                 .collection = collection,
                 .rkey = rkey,
+                .cid = op_cid,
                 .record = record,
             });
         }
@@ -187,9 +216,12 @@ fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
     return .{ .commit = .{
         .seq = seq_val,
         .repo = repo,
-        .rev = payload.getString("rev"),
-        .time = payload.getString("time"),
+        .rev = rev,
+        .time = time,
+        .since = payload.getString("since"),
+        .commit = commit_cid,
         .ops = try ops.toOwnedSlice(allocator),
+        .blobs = try blobs.toOwnedSlice(allocator),
         .too_big = payload.getBool("tooBig") orelse false,
     } };
 }
@@ -198,7 +230,7 @@ fn decodeIdentity(payload: cbor.Value) DecodeError!Event {
     return .{ .identity = .{
         .seq = payload.getInt("seq") orelse return error.MissingField,
         .did = payload.getString("did") orelse return error.MissingField,
-        .time = payload.getString("time"),
+        .time = payload.getString("time") orelse return error.MissingField,
         .handle = payload.getString("handle"),
     } };
 }
@@ -208,7 +240,7 @@ fn decodeAccount(payload: cbor.Value) DecodeError!Event {
     return .{ .account = .{
         .seq = payload.getInt("seq") orelse return error.MissingField,
         .did = payload.getString("did") orelse return error.MissingField,
-        .time = payload.getString("time"),
+        .time = payload.getString("time") orelse return error.MissingField,
         .active = payload.getBool("active") orelse true,
         .status = if (status_str) |s| AccountStatus.parse(s) else null,
     } };
@@ -294,22 +326,30 @@ fn encodeCommitPayload(allocator: Allocator, writer: anytype, commit: CommitEven
     };
     const blocks_bytes = try car.writeAlloc(allocator, car_data);
 
+    // build blobs array
+    var blob_values: std.ArrayList(cbor.Value) = .{};
+    defer blob_values.deinit(allocator);
+    for (commit.blobs) |blob| {
+        try blob_values.append(allocator, .{ .cid = blob });
+    }
+
     // build payload entries
     var entries: std.ArrayList(cbor.Value.MapEntry) = .{};
     defer entries.deinit(allocator);
 
-    if (blocks_bytes.len > 0) {
-        try entries.append(allocator, .{ .key = "blocks", .value = .{ .bytes = blocks_bytes } });
+    try entries.append(allocator, .{ .key = "blocks", .value = .{ .bytes = blocks_bytes } });
+    if (commit.commit) |c| {
+        try entries.append(allocator, .{ .key = "commit", .value = .{ .cid = c } });
     }
+    try entries.append(allocator, .{ .key = "blobs", .value = .{ .array = blob_values.items } });
     try entries.append(allocator, .{ .key = "ops", .value = .{ .array = op_values.items } });
     try entries.append(allocator, .{ .key = "repo", .value = .{ .text = commit.repo } });
-    if (commit.rev) |rev| {
-        try entries.append(allocator, .{ .key = "rev", .value = .{ .text = rev } });
-    }
+    try entries.append(allocator, .{ .key = "rev", .value = .{ .text = commit.rev } });
     try entries.append(allocator, .{ .key = "seq", .value = .{ .unsigned = @intCast(commit.seq) } });
-    if (commit.time) |t| {
-        try entries.append(allocator, .{ .key = "time", .value = .{ .text = t } });
+    if (commit.since) |s| {
+        try entries.append(allocator, .{ .key = "since", .value = .{ .text = s } });
     }
+    try entries.append(allocator, .{ .key = "time", .value = .{ .text = commit.time } });
     if (commit.too_big) {
         try entries.append(allocator, .{ .key = "tooBig", .value = .{ .boolean = true } });
     }
@@ -326,9 +366,7 @@ fn encodeIdentityPayload(allocator: Allocator, writer: anytype, identity: Identi
         try entries.append(allocator, .{ .key = "handle", .value = .{ .text = h } });
     }
     try entries.append(allocator, .{ .key = "seq", .value = .{ .unsigned = @intCast(identity.seq) } });
-    if (identity.time) |t| {
-        try entries.append(allocator, .{ .key = "time", .value = .{ .text = t } });
-    }
+    try entries.append(allocator, .{ .key = "time", .value = .{ .text = identity.time } });
 
     try cbor.encode(allocator, writer, .{ .map = entries.items });
 }
@@ -345,9 +383,7 @@ fn encodeAccountPayload(allocator: Allocator, writer: anytype, account: AccountE
     if (account.status) |s| {
         try entries.append(allocator, .{ .key = "status", .value = .{ .text = @tagName(s) } });
     }
-    if (account.time) |t| {
-        try entries.append(allocator, .{ .key = "time", .value = .{ .text = t } });
-    }
+    try entries.append(allocator, .{ .key = "time", .value = .{ .text = account.time } });
 
     try cbor.encode(allocator, writer, .{ .map = entries.items });
 }
@@ -502,27 +538,19 @@ test "decode identity frame" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    // header: {op: 1, t: "#identity"}
-    const header_bytes = [_]u8{
-        0xa2, // map(2)
-        0x62, 'o', 'p', 0x01, // "op": 1
-        0x61, 't', 0x69, '#', 'i', 'd', 'e', 'n', 't', 'i', 't', 'y', // "t": "#identity"
-    };
-    // payload: {seq: 42, did: "did:plc:test"}
-    const payload_bytes = [_]u8{
-        0xa2, // map(2)
-        0x63, 's', 'e', 'q', 0x18, 42, // "seq": 42
-        0x63, 'd', 'i', 'd', 0x6c, 'd', 'i', 'd', ':', 'p', 'l', 'c', ':', 't', 'e', 's', 't', // "did": "did:plc:test"
-    };
+    // build frame via encoder for cleaner test
+    const original = Event{ .identity = .{
+        .seq = 42,
+        .did = "did:plc:test",
+        .time = "2024-01-15T10:30:00Z",
+    } };
+    const frame = try encodeFrame(alloc, original);
 
-    var frame: [header_bytes.len + payload_bytes.len]u8 = undefined;
-    @memcpy(frame[0..header_bytes.len], &header_bytes);
-    @memcpy(frame[header_bytes.len..], &payload_bytes);
-
-    const event = try decodeFrame(alloc, &frame);
+    const event = try decodeFrame(alloc, frame);
     const identity = event.identity;
     try std.testing.expectEqual(@as(i64, 42), identity.seq);
     try std.testing.expectEqualStrings("did:plc:test", identity.did);
+    try std.testing.expectEqualStrings("2024-01-15T10:30:00Z", identity.time);
 }
 
 test "Event.seq works" {
@@ -532,6 +560,7 @@ test "Event.seq works" {
     const identity_event = Event{ .identity = .{
         .seq = 42,
         .did = "did:plc:test",
+        .time = "2024-01-15T10:30:00Z",
     } };
     try std.testing.expectEqual(@as(i64, 42), identity_event.seq().?);
 }
@@ -563,8 +592,8 @@ test "encode → decode identity frame" {
     const original = Event{ .identity = .{
         .seq = 42,
         .did = "did:plc:test123",
-        .handle = "alice.bsky.social",
         .time = "2024-01-15T10:30:00Z",
+        .handle = "alice.bsky.social",
     } };
 
     const frame = try encodeFrame(alloc, original);
@@ -573,8 +602,8 @@ test "encode → decode identity frame" {
     const id = decoded.identity;
     try std.testing.expectEqual(@as(i64, 42), id.seq);
     try std.testing.expectEqualStrings("did:plc:test123", id.did);
+    try std.testing.expectEqualStrings("2024-01-15T10:30:00Z", id.time);
     try std.testing.expectEqualStrings("alice.bsky.social", id.handle.?);
-    try std.testing.expectEqualStrings("2024-01-15T10:30:00Z", id.time.?);
 }
 
 test "encode → decode account frame" {
@@ -585,9 +614,9 @@ test "encode → decode account frame" {
     const original = Event{ .account = .{
         .seq = 100,
         .did = "did:plc:suspended",
+        .time = "2024-01-15T10:30:00Z",
         .active = false,
         .status = .suspended,
-        .time = "2024-01-15T10:30:00Z",
     } };
 
     const frame = try encodeFrame(alloc, original);
@@ -596,6 +625,7 @@ test "encode → decode account frame" {
     const acct = decoded.account;
     try std.testing.expectEqual(@as(i64, 100), acct.seq);
     try std.testing.expectEqualStrings("did:plc:suspended", acct.did);
+    try std.testing.expectEqualStrings("2024-01-15T10:30:00Z", acct.time);
     try std.testing.expectEqual(false, acct.active);
     try std.testing.expectEqual(AccountStatus.suspended, acct.status.?);
 }
@@ -613,8 +643,9 @@ test "encode → decode commit frame with record" {
     const original = Event{ .commit = .{
         .seq = 999,
         .repo = "did:plc:poster",
-        .rev = "abc123",
+        .rev = "3k2abc000000",
         .time = "2024-01-15T10:30:00Z",
+        .since = "3k2abd000000",
         .ops = &.{.{
             .action = .create,
             .collection = "app.bsky.feed.post",
@@ -629,13 +660,17 @@ test "encode → decode commit frame with record" {
     const commit = decoded.commit;
     try std.testing.expectEqual(@as(i64, 999), commit.seq);
     try std.testing.expectEqualStrings("did:plc:poster", commit.repo);
-    try std.testing.expectEqualStrings("abc123", commit.rev.?);
+    try std.testing.expectEqualStrings("3k2abc000000", commit.rev);
+    try std.testing.expectEqualStrings("2024-01-15T10:30:00Z", commit.time);
+    try std.testing.expectEqualStrings("3k2abd000000", commit.since.?);
+    try std.testing.expectEqual(@as(usize, 0), commit.blobs.len);
     try std.testing.expectEqual(@as(usize, 1), commit.ops.len);
 
     const op = commit.ops[0];
     try std.testing.expectEqual(CommitAction.create, op.action);
     try std.testing.expectEqualStrings("app.bsky.feed.post", op.collection);
     try std.testing.expectEqualStrings("3k2abc", op.rkey);
+    try std.testing.expect(op.cid != null);
 
     // record should be decoded from the CAR blocks
     const rec = op.record.?;
@@ -651,6 +686,8 @@ test "encode → decode commit with delete (no record)" {
     const original = Event{ .commit = .{
         .seq = 500,
         .repo = "did:plc:deleter",
+        .rev = "3k2xyz000000",
+        .time = "2024-01-15T10:30:00Z",
         .ops = &.{.{
             .action = .delete,
             .collection = "app.bsky.feed.post",
@@ -663,7 +700,10 @@ test "encode → decode commit with delete (no record)" {
     const decoded = try decodeFrame(alloc, frame);
 
     try std.testing.expectEqual(@as(i64, 500), decoded.commit.seq);
+    try std.testing.expectEqualStrings("3k2xyz000000", decoded.commit.rev);
+    try std.testing.expectEqualStrings("2024-01-15T10:30:00Z", decoded.commit.time);
     try std.testing.expectEqual(@as(usize, 1), decoded.commit.ops.len);
     try std.testing.expectEqual(CommitAction.delete, decoded.commit.ops[0].action);
+    try std.testing.expect(decoded.commit.ops[0].cid == null);
     try std.testing.expect(decoded.commit.ops[0].record == null);
 }
