@@ -19,8 +19,23 @@ const log = std.log.scoped(.zat);
 pub const CommitAction = sync.CommitAction;
 pub const AccountStatus = sync.AccountStatus;
 
+pub const default_hosts = [_][]const u8{
+    "jetstream1.us-east.bsky.network",
+    "jetstream2.us-east.bsky.network",
+    "jetstream1.us-west.bsky.network",
+    "jetstream2.us-west.bsky.network",
+    "jetstream.waow.tech",
+    "jetstream.fire.hose.cam",
+    "jet.firehose.stream",
+    "sfo.firehose.stream",
+    "nyc.firehose.stream",
+    "london.firehose.stream",
+    "frankfurt.firehose.stream",
+    "chennai.firehose.stream",
+};
+
 pub const Options = struct {
-    host: []const u8 = "jetstream2.us-east.bsky.network",
+    hosts: []const []const u8 = &default_hosts,
     wanted_collections: []const []const u8 = &.{},
     wanted_dids: []const []const u8 = &.{},
     cursor: ?i64 = null,
@@ -133,31 +148,50 @@ pub const JetstreamClient = struct {
     /// handler must implement: fn onEvent(*@TypeOf(handler), Event) void
     /// optional: fn onError(*@TypeOf(handler), anyerror) void
     /// blocks forever — reconnects with exponential backoff on disconnect.
+    /// rotates through hosts on each reconnect attempt.
     pub fn subscribe(self: *JetstreamClient, handler: anytype) void {
         var backoff: u64 = 1;
+        var host_index: usize = 0;
         const max_backoff: u64 = 60;
+        var prev_host_index: usize = 0;
 
         while (true) {
-            self.connectAndRead(handler) catch |err| {
+            const host = self.options.hosts[host_index % self.options.hosts.len];
+            const effective_index = host_index % self.options.hosts.len;
+
+            // rewind cursor by 10s on host switch (different instances may lag)
+            if (host_index > 0 and effective_index != prev_host_index) {
+                if (self.last_time_us) |t| {
+                    self.last_time_us = t - 10_000_000;
+                }
+                backoff = 1;
+            }
+
+            log.info("connecting to host {d}/{d}: {s}", .{ effective_index + 1, self.options.hosts.len, host });
+
+            self.connectAndRead(host, handler) catch |err| {
                 if (comptime @hasDecl(@TypeOf(handler.*), "onError")) {
                     handler.onError(err);
                 } else {
                     log.err("jetstream error: {s}, reconnecting in {d}s...", .{ @errorName(err), backoff });
                 }
             };
+
+            prev_host_index = effective_index;
+            host_index += 1;
             posix.nanosleep(backoff, 0);
             backoff = @min(backoff * 2, max_backoff);
         }
     }
 
-    fn connectAndRead(self: *JetstreamClient, handler: anytype) !void {
+    fn connectAndRead(self: *JetstreamClient, host: []const u8, handler: anytype) !void {
         var path_buf: [2048]u8 = undefined;
         const path = try self.buildSubscribePath(&path_buf);
 
-        log.info("connecting to wss://{s}{s}", .{ self.options.host, path });
+        log.info("connecting to wss://{s}{s}", .{ host, path });
 
         var client = try websocket.Client.init(self.allocator, .{
-            .host = self.options.host,
+            .host = host,
             .port = 443,
             .tls = true,
             .max_size = self.options.max_message_size,
@@ -165,11 +199,11 @@ pub const JetstreamClient = struct {
         defer client.deinit();
 
         var host_header_buf: [256]u8 = undefined;
-        const host_header = std.fmt.bufPrint(&host_header_buf, "Host: {s}\r\n", .{self.options.host}) catch self.options.host;
+        const host_header = std.fmt.bufPrint(&host_header_buf, "Host: {s}\r\n", .{host}) catch host;
 
         try client.handshake(path, .{ .headers = host_header });
 
-        log.info("jetstream connected", .{});
+        log.info("jetstream connected to {s}", .{host});
 
         var ws_handler = WsHandler(@TypeOf(handler.*)){
             .allocator = self.allocator,
@@ -495,4 +529,43 @@ test "parse missing did returns error" {
     defer arena.deinit();
 
     try std.testing.expectError(error.MissingDid, parseEvent(arena.allocator(), payload));
+}
+
+test "default hosts contains known jetstream instances" {
+    try std.testing.expectEqual(@as(usize, 12), default_hosts.len);
+    try std.testing.expectEqualStrings("jetstream1.us-east.bsky.network", default_hosts[0]);
+    try std.testing.expectEqualStrings("jetstream2.us-east.bsky.network", default_hosts[1]);
+    try std.testing.expectEqualStrings("jetstream1.us-west.bsky.network", default_hosts[2]);
+    try std.testing.expectEqualStrings("jetstream2.us-west.bsky.network", default_hosts[3]);
+    try std.testing.expectEqualStrings("jetstream.waow.tech", default_hosts[4]);
+    try std.testing.expectEqualStrings("jetstream.fire.hose.cam", default_hosts[5]);
+    try std.testing.expectEqualStrings("jet.firehose.stream", default_hosts[6]);
+    try std.testing.expectEqualStrings("chennai.firehose.stream", default_hosts[11]);
+}
+
+test "round-robin cycles through hosts" {
+    const hosts = [_][]const u8{ "host-a", "host-b", "host-c" };
+    // simulate the index logic from subscribe()
+    for (0..9) |i| {
+        const host = hosts[i % hosts.len];
+        const expected: []const u8 = switch (i % 3) {
+            0 => "host-a",
+            1 => "host-b",
+            2 => "host-c",
+            else => unreachable,
+        };
+        try std.testing.expectEqualStrings(expected, host);
+    }
+}
+
+test "options default hosts are used" {
+    const opts = Options{};
+    try std.testing.expectEqual(@as(usize, 12), opts.hosts.len);
+    try std.testing.expectEqualStrings("jetstream1.us-east.bsky.network", opts.hosts[0]);
+}
+
+test "options custom single host" {
+    const opts = Options{ .hosts = &.{"my-custom-host.example.com"} };
+    try std.testing.expectEqual(@as(usize, 1), opts.hosts.len);
+    try std.testing.expectEqualStrings("my-custom-host.example.com", opts.hosts[0]);
 }

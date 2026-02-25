@@ -23,8 +23,15 @@ const log = std.log.scoped(.zat);
 pub const CommitAction = sync.CommitAction;
 pub const AccountStatus = sync.AccountStatus;
 
+pub const default_hosts = [_][]const u8{
+    "bsky.network",
+    "northamerica.firehose.network",
+    "europe.firehose.network",
+    "asia.firehose.network",
+};
+
 pub const Options = struct {
-    host: []const u8 = "bsky.network",
+    hosts: []const []const u8 = &default_hosts,
     cursor: ?i64 = null,
     max_message_size: usize = 5 * 1024 * 1024, // 5MB — firehose frames can be large
 };
@@ -421,24 +428,40 @@ pub const FirehoseClient = struct {
     /// handler must implement: fn onEvent(*@TypeOf(handler), Event) void
     /// optional: fn onError(*@TypeOf(handler), anyerror) void
     /// blocks forever — reconnects with exponential backoff on disconnect.
+    /// rotates through hosts on each reconnect attempt.
     pub fn subscribe(self: *FirehoseClient, handler: anytype) void {
         var backoff: u64 = 1;
+        var host_index: usize = 0;
         const max_backoff: u64 = 60;
+        var prev_host_index: usize = 0;
 
         while (true) {
-            self.connectAndRead(handler) catch |err| {
+            const host = self.options.hosts[host_index % self.options.hosts.len];
+            const effective_index = host_index % self.options.hosts.len;
+
+            // reset backoff on host switch (fresh host deserves a fresh chance)
+            if (host_index > 0 and effective_index != prev_host_index) {
+                backoff = 1;
+            }
+
+            log.info("connecting to host {d}/{d}: {s}", .{ effective_index + 1, self.options.hosts.len, host });
+
+            self.connectAndRead(host, handler) catch |err| {
                 if (comptime @hasDecl(@TypeOf(handler.*), "onError")) {
                     handler.onError(err);
                 } else {
                     log.err("firehose error: {s}, reconnecting in {d}s...", .{ @errorName(err), backoff });
                 }
             };
+
+            prev_host_index = effective_index;
+            host_index += 1;
             posix.nanosleep(backoff, 0);
             backoff = @min(backoff * 2, max_backoff);
         }
     }
 
-    fn connectAndRead(self: *FirehoseClient, handler: anytype) !void {
+    fn connectAndRead(self: *FirehoseClient, host: []const u8, handler: anytype) !void {
         var path_buf: [256]u8 = undefined;
         var stream = std.io.fixedBufferStream(&path_buf);
         const writer = stream.writer();
@@ -449,10 +472,10 @@ pub const FirehoseClient = struct {
         }
         const path = stream.getWritten();
 
-        log.info("connecting to wss://{s}{s}", .{ self.options.host, path });
+        log.info("connecting to wss://{s}{s}", .{ host, path });
 
         var client = try websocket.Client.init(self.allocator, .{
-            .host = self.options.host,
+            .host = host,
             .port = 443,
             .tls = true,
             .max_size = self.options.max_message_size,
@@ -460,11 +483,11 @@ pub const FirehoseClient = struct {
         defer client.deinit();
 
         var host_header_buf: [256]u8 = undefined;
-        const host_header = std.fmt.bufPrint(&host_header_buf, "Host: {s}\r\n", .{self.options.host}) catch self.options.host;
+        const host_header = std.fmt.bufPrint(&host_header_buf, "Host: {s}\r\n", .{host}) catch host;
 
         try client.handshake(path, .{ .headers = host_header });
 
-        log.info("firehose connected", .{});
+        log.info("firehose connected to {s}", .{host});
 
         var ws_handler = WsHandler(@TypeOf(handler.*)){
             .allocator = self.allocator,

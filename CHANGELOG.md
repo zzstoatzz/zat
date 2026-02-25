@@ -1,8 +1,32 @@
 # changelog
 
+## 0.1.6
+
+- round-robin host rotation for jetstream and firehose clients
+- `Options.host` → `Options.hosts` with sensible defaults (bsky + community relays)
+- backoff resets on host switch, jetstream rewinds cursor by 10s
+- default jetstream hosts: 4 official bsky, waow.tech, fire.hose.cam, 6 firehose.stream regions
+- default firehose hosts: bsky.network + 3 firehose.network regions
+
+## 0.1.5
+
+- align firehose event types with AT Protocol sync spec
+
+## 0.1.4
+
+- firehose support: DAG-CBOR codec, CAR codec, CID creation, firehose client
+- encode and decode `com.atproto.sync.subscribeRepos` binary frames
+
+## 0.1.3
+
+- jetstream WebSocket client with typed events, reconnection, and cursor tracking
+- `extractAt` ignores unknown JSON fields by default
+- HTTP I/O isolated behind `HttpTransport` for 0.16 prep
+- websocket dependency pinned to specific commit
+
 ## 0.1.2
 
-- `extractAt` now logs diagnostic info on parse failures (enable with `.zat` debug scope)
+- `extractAt` logs diagnostic info on parse failures (enable with `.zat` debug scope)
 
 ## 0.1.1
 
