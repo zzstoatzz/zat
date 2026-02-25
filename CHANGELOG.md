@@ -1,5 +1,15 @@
 # changelog
 
+## 0.1.7
+
+- slim `Cid` struct from 56 to 16 bytes — store only raw bytes, parse version/codec/digest lazily on demand
+- `Value` union shrinks from 64 to 24 bytes, `MapEntry` from 80 to 40 bytes
+- zero-cost CID decode — tag 42 handler stores a byte slice reference instead of parsing varint fields
+- inline map key reading in CBOR decoder — skips full `decodeAt` + union construction per key
+- comptime size assertions for `Value` and `MapEntry`
+- **breaking**: `Cid` fields (`version`, `codec`, `hash_fn`, `digest`) are now accessor methods returning optionals — e.g. `cid.version` → `cid.version().?`
+- `parseCid` simplified to a trivial raw-bytes wrapper
+
 ## 0.1.6
 
 - round-robin host rotation for jetstream and firehose clients

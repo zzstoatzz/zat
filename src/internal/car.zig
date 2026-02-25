@@ -273,9 +273,9 @@ test "read CAR with roots" {
 
     const car_file = try read(alloc, car_buf.items);
     try std.testing.expectEqual(@as(usize, 1), car_file.roots.len);
-    try std.testing.expectEqual(root_cid.version, car_file.roots[0].version);
-    try std.testing.expectEqual(root_cid.codec, car_file.roots[0].codec);
-    try std.testing.expectEqualSlices(u8, root_cid.digest, car_file.roots[0].digest);
+    try std.testing.expectEqual(root_cid.version().?, car_file.roots[0].version().?);
+    try std.testing.expectEqual(root_cid.codec().?, car_file.roots[0].codec().?);
+    try std.testing.expectEqualSlices(u8, root_cid.digest().?, car_file.roots[0].digest().?);
 }
 
 test "write → read round-trip" {
@@ -303,7 +303,7 @@ test "write → read round-trip" {
 
     // verify roots
     try std.testing.expectEqual(@as(usize, 1), parsed.roots.len);
-    try std.testing.expectEqualSlices(u8, cid1.digest, parsed.roots[0].digest);
+    try std.testing.expectEqualSlices(u8, cid1.digest().?, parsed.roots[0].digest().?);
 
     // verify blocks
     try std.testing.expectEqual(@as(usize, 2), parsed.blocks.len);

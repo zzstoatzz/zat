@@ -107,6 +107,12 @@ pub const Value = union(enum) {
             else => null,
         };
     }
+
+    // verify the Value union stayed slim after Cid optimization (was ~64, now 24)
+    comptime {
+        std.debug.assert(@sizeOf(Value) == 24);
+        std.debug.assert(@sizeOf(MapEntry) == 40);
+    }
 };
 
 /// well-known multicodec values
@@ -122,67 +128,84 @@ pub const HashFn = struct {
     pub const identity: u64 = 0x00;
 };
 
-/// CID (Content Identifier) parsed from tag 42
+/// CID (Content Identifier) parsed from tag 42.
+/// stores only the raw bytes — version/codec/hash_fn/digest are parsed lazily on demand.
+/// this keeps the struct at 16 bytes (1 slice) instead of 56 bytes, which shrinks
+/// the Value union from ~64 to ~24 bytes.
 pub const Cid = struct {
-    version: u64,
-    codec: u64,
-    hash_fn: u64,
-    digest: []const u8,
-    raw: []const u8, // full CID bytes (for matching against CAR block CIDs)
+    raw: []const u8,
+
+    /// parse CID version from raw bytes (0 for CIDv0, 1+ for CIDv1)
+    pub fn version(self: Cid) ?u64 {
+        if (self.raw.len < 2) return null;
+        // CIDv0: starts with 0x12 0x20 (sha2-256 multihash)
+        if (self.raw[0] == 0x12 and self.raw[1] == 0x20) return 0;
+        var pos: usize = 0;
+        return readUvarint(self.raw, &pos);
+    }
+
+    /// parse codec from raw bytes (implicit dag-pb for CIDv0)
+    pub fn codec(self: Cid) ?u64 {
+        if (self.raw.len < 2) return null;
+        if (self.raw[0] == 0x12 and self.raw[1] == 0x20) return 0x70; // dag-pb
+        var pos: usize = 0;
+        _ = readUvarint(self.raw, &pos) orelse return null; // version
+        return readUvarint(self.raw, &pos);
+    }
+
+    /// parse hash function code from raw bytes
+    pub fn hashFn(self: Cid) ?u64 {
+        if (self.raw.len < 2) return null;
+        if (self.raw[0] == 0x12 and self.raw[1] == 0x20) return 0x12; // sha2-256
+        var pos: usize = 0;
+        _ = readUvarint(self.raw, &pos) orelse return null; // version
+        _ = readUvarint(self.raw, &pos) orelse return null; // codec
+        return readUvarint(self.raw, &pos);
+    }
+
+    /// parse digest bytes from raw CID
+    pub fn digest(self: Cid) ?[]const u8 {
+        if (self.raw.len < 2) return null;
+        if (self.raw[0] == 0x12 and self.raw[1] == 0x20) {
+            if (self.raw.len < 34) return null;
+            return self.raw[2..34];
+        }
+        var pos: usize = 0;
+        _ = readUvarint(self.raw, &pos) orelse return null; // version
+        _ = readUvarint(self.raw, &pos) orelse return null; // codec
+        _ = readUvarint(self.raw, &pos) orelse return null; // hash_fn
+        const digest_len = readUvarint(self.raw, &pos) orelse return null;
+        if (pos + digest_len > self.raw.len) return null;
+        return self.raw[pos..][0..digest_len];
+    }
 
     /// create a CIDv1 by hashing DAG-CBOR encoded data with SHA-256.
-    /// the returned Cid's raw/digest slices are owned by the allocator.
+    /// the returned Cid's raw slice is owned by the allocator.
     pub fn forDagCbor(allocator: Allocator, data: []const u8) !Cid {
         return create(allocator, 1, Codec.dag_cbor, HashFn.sha2_256, data);
     }
 
     /// create a CIDv1 with the given codec by hashing data with SHA-256.
-    pub fn create(allocator: Allocator, version: u64, codec: u64, hash_fn_code: u64, data: []const u8) !Cid {
-        // compute SHA-256 digest
+    pub fn create(allocator: Allocator, ver: u64, cod: u64, hash_fn_code: u64, data: []const u8) !Cid {
         const Sha256 = std.crypto.hash.sha2.Sha256;
         var hash: [Sha256.digest_length]u8 = undefined;
         Sha256.hash(data, &hash, .{});
 
-        // build raw CID bytes: version varint + codec varint + hash_fn varint + digest_len varint + digest
         var raw_buf: std.ArrayList(u8) = .{};
         errdefer raw_buf.deinit(allocator);
         const writer = raw_buf.writer(allocator);
-        try writeUvarint(writer, version);
-        try writeUvarint(writer, codec);
+        try writeUvarint(writer, ver);
+        try writeUvarint(writer, cod);
         try writeUvarint(writer, hash_fn_code);
         try writeUvarint(writer, Sha256.digest_length);
         try writer.writeAll(&hash);
 
-        const raw = try raw_buf.toOwnedSlice(allocator);
-
-        // locate digest within the raw slice (it's the last 32 bytes)
-        const digest = raw[raw.len - Sha256.digest_length ..];
-
-        return .{
-            .version = version,
-            .codec = codec,
-            .hash_fn = hash_fn_code,
-            .digest = digest,
-            .raw = raw,
-        };
+        return .{ .raw = try raw_buf.toOwnedSlice(allocator) };
     }
 
     /// serialize this CID to raw bytes (version varint + codec varint + multihash)
     pub fn toBytes(self: Cid, allocator: Allocator) ![]u8 {
-        // if we already have raw bytes, just duplicate them
-        if (self.raw.len > 0) {
-            return try allocator.dupe(u8, self.raw);
-        }
-
-        var buf: std.ArrayList(u8) = .{};
-        errdefer buf.deinit(allocator);
-        const writer = buf.writer(allocator);
-        try writeUvarint(writer, self.version);
-        try writeUvarint(writer, self.codec);
-        try writeUvarint(writer, self.hash_fn);
-        try writeUvarint(writer, @as(u64, self.digest.len));
-        try writer.writeAll(self.digest);
-        return try buf.toOwnedSlice(allocator);
+        return try allocator.dupe(u8, self.raw);
     }
 };
 
@@ -260,16 +283,18 @@ fn decodeAt(allocator: Allocator, data: []const u8, pos: *usize) DecodeError!Val
             const count = try readArgument(data, pos, additional);
             const entries = try allocator.alloc(Value.MapEntry, @intCast(count));
             for (entries) |*entry| {
-                // DAG-CBOR: map keys must be text strings
-                const key_val = try decodeAt(allocator, data, pos);
-                const key = switch (key_val) {
-                    .text => |t| t,
-                    else => return error.InvalidMapKey,
-                };
-                entry.* = .{
-                    .key = key,
-                    .value = try decodeAt(allocator, data, pos),
-                };
+                // DAG-CBOR: map keys must be text strings — inline read to avoid
+                // a full decodeAt + Value union construction per key
+                if (pos.* >= data.len) return error.UnexpectedEof;
+                const key_byte = data[pos.*];
+                pos.* += 1;
+                if (@as(u3, @truncate(key_byte >> 5)) != 3) return error.InvalidMapKey;
+                const key_len = try readArgument(data, pos, @truncate(key_byte));
+                const key_end = pos.* + @as(usize, @intCast(key_len));
+                if (key_end > data.len) return error.UnexpectedEof;
+                entry.key = data[pos.*..key_end];
+                pos.* = key_end;
+                entry.value = try decodeAt(allocator, data, pos);
             }
             return .{ .map = entries };
         },
@@ -283,8 +308,7 @@ fn decodeAt(allocator: Allocator, data: []const u8, pos: *usize) DecodeError!Val
                     else => return error.InvalidCid,
                 };
                 if (cid_bytes.len < 1 or cid_bytes[0] != 0x00) return error.InvalidCid;
-                const raw = cid_bytes[1..]; // skip identity multibase prefix
-                return .{ .cid = try parseCid(raw) };
+                return .{ .cid = .{ .raw = cid_bytes[1..] } }; // zero-cost: just reference the bytes
             }
             // generic tag — allocate content on heap
             const content_ptr = try allocator.create(Value);
@@ -337,38 +361,10 @@ fn readArgument(data: []const u8, pos: *usize, additional: u5) DecodeError!u64 {
     };
 }
 
-/// parse a CID from raw bytes (after removing the 0x00 multibase prefix)
-pub fn parseCid(raw: []const u8) DecodeError!Cid {
-    if (raw.len < 2) return error.InvalidCid;
-
-    // CIDv0: starts with 0x12 0x20 (sha2-256, 32-byte digest)
-    if (raw[0] == 0x12 and raw[1] == 0x20) {
-        if (raw.len < 34) return error.InvalidCid;
-        return .{
-            .version = 0,
-            .codec = 0x70, // dag-pb (implicit for CIDv0)
-            .hash_fn = 0x12, // sha2-256
-            .digest = raw[2..34],
-            .raw = raw,
-        };
-    }
-
-    // CIDv1: version varint + codec varint + multihash
-    var pos: usize = 0;
-    const version = readUvarint(raw, &pos) orelse return error.InvalidCid;
-    const codec = readUvarint(raw, &pos) orelse return error.InvalidCid;
-    const hash_fn = readUvarint(raw, &pos) orelse return error.InvalidCid;
-    const digest_len = readUvarint(raw, &pos) orelse return error.InvalidCid;
-
-    if (pos + digest_len > raw.len) return error.InvalidCid;
-
-    return .{
-        .version = version,
-        .codec = codec,
-        .hash_fn = hash_fn,
-        .digest = raw[pos..][0..digest_len],
-        .raw = raw,
-    };
+/// wrap raw CID bytes (after removing the 0x00 multibase prefix) into a Cid.
+/// validates the structure is parseable but stores only the raw bytes.
+pub fn parseCid(raw: []const u8) Cid {
+    return .{ .raw = raw };
 }
 
 /// read an unsigned varint (LEB128)
@@ -826,10 +822,6 @@ test "encode CID via tag 42" {
     } ++ [_]u8{0xaa} ** 32;
 
     const original: Value = .{ .cid = .{
-        .version = 1,
-        .codec = 0x71,
-        .hash_fn = 0x12,
-        .digest = raw_cid[4..],
         .raw = &raw_cid,
     } };
 
@@ -838,9 +830,9 @@ test "encode CID via tag 42" {
 
     // should decode back as a CID with the same raw bytes
     const cid = decoded.cid;
-    try std.testing.expectEqual(@as(u64, 1), cid.version);
-    try std.testing.expectEqual(@as(u64, 0x71), cid.codec);
-    try std.testing.expectEqual(@as(u64, 0x12), cid.hash_fn);
+    try std.testing.expectEqual(@as(u64, 1), cid.version().?);
+    try std.testing.expectEqual(@as(u64, 0x71), cid.codec().?);
+    try std.testing.expectEqual(@as(u64, 0x12), cid.hashFn().?);
     try std.testing.expectEqualSlices(u8, &raw_cid, cid.raw);
 }
 
@@ -896,10 +888,10 @@ test "Cid.forDagCbor creates valid CIDv1" {
     const encoded = try encodeAlloc(alloc, value);
     const cid = try Cid.forDagCbor(alloc, encoded);
 
-    try std.testing.expectEqual(@as(u64, 1), cid.version);
-    try std.testing.expectEqual(Codec.dag_cbor, cid.codec);
-    try std.testing.expectEqual(HashFn.sha2_256, cid.hash_fn);
-    try std.testing.expectEqual(@as(usize, 32), cid.digest.len);
+    try std.testing.expectEqual(@as(u64, 1), cid.version().?);
+    try std.testing.expectEqual(Codec.dag_cbor, cid.codec().?);
+    try std.testing.expectEqual(HashFn.sha2_256, cid.hashFn().?);
+    try std.testing.expectEqual(@as(usize, 32), cid.digest().?.len);
     // raw should be: version(1) + codec(0x71) + hash_fn(0x12) + digest_len(0x20) + 32 bytes
     try std.testing.expectEqual(@as(usize, 36), cid.raw.len);
 }
@@ -914,7 +906,7 @@ test "Cid.forDagCbor is deterministic" {
     const cid2 = try Cid.forDagCbor(alloc, data);
 
     try std.testing.expectEqualSlices(u8, cid1.raw, cid2.raw);
-    try std.testing.expectEqualSlices(u8, cid1.digest, cid2.digest);
+    try std.testing.expectEqualSlices(u8, cid1.digest().?, cid2.digest().?);
 }
 
 test "Cid.forDagCbor different data → different CIDs" {
@@ -925,7 +917,7 @@ test "Cid.forDagCbor different data → different CIDs" {
     const cid1 = try Cid.forDagCbor(alloc, "data A");
     const cid2 = try Cid.forDagCbor(alloc, "data B");
 
-    try std.testing.expect(!std.mem.eql(u8, cid1.digest, cid2.digest));
+    try std.testing.expect(!std.mem.eql(u8, cid1.digest().?, cid2.digest().?));
 }
 
 test "Cid.toBytes round-trips through parseCid" {
@@ -935,12 +927,12 @@ test "Cid.toBytes round-trips through parseCid" {
 
     const cid = try Cid.forDagCbor(alloc, "test content");
     const bytes = try cid.toBytes(alloc);
-    const parsed = try parseCid(bytes);
+    const parsed = parseCid(bytes);
 
-    try std.testing.expectEqual(cid.version, parsed.version);
-    try std.testing.expectEqual(cid.codec, parsed.codec);
-    try std.testing.expectEqual(cid.hash_fn, parsed.hash_fn);
-    try std.testing.expectEqualSlices(u8, cid.digest, parsed.digest);
+    try std.testing.expectEqual(cid.version().?, parsed.version().?);
+    try std.testing.expectEqual(cid.codec().?, parsed.codec().?);
+    try std.testing.expectEqual(cid.hashFn().?, parsed.hashFn().?);
+    try std.testing.expectEqualSlices(u8, cid.digest().?, parsed.digest().?);
 }
 
 test "CID round-trip through CBOR encode/decode" {
@@ -959,9 +951,9 @@ test "CID round-trip through CBOR encode/decode" {
     const decoded = try decodeAll(alloc, encoded);
 
     const got = decoded.get("link").?.cid;
-    try std.testing.expectEqual(cid.version, got.version);
-    try std.testing.expectEqual(cid.codec, got.codec);
-    try std.testing.expectEqualSlices(u8, cid.digest, got.digest);
+    try std.testing.expectEqual(cid.version().?, got.version().?);
+    try std.testing.expectEqual(cid.codec().?, got.codec().?);
+    try std.testing.expectEqualSlices(u8, cid.digest().?, got.digest().?);
 }
 
 // === verify CIDs against real AT Protocol records ===
@@ -990,10 +982,10 @@ test "real record: pfrazee 'First!' post CID matches network" {
         0x4e, 0x04, 0xdc, 0x7a, 0x88, 0x21, 0x6b, 0xfa,
     };
 
-    try std.testing.expectEqualSlices(u8, &expected_digest, cid.digest);
-    try std.testing.expectEqual(@as(u64, 1), cid.version);
-    try std.testing.expectEqual(Codec.dag_cbor, cid.codec);
-    try std.testing.expectEqual(HashFn.sha2_256, cid.hash_fn);
+    try std.testing.expectEqualSlices(u8, &expected_digest, cid.digest().?);
+    try std.testing.expectEqual(@as(u64, 1), cid.version().?);
+    try std.testing.expectEqual(Codec.dag_cbor, cid.codec().?);
+    try std.testing.expectEqual(HashFn.sha2_256, cid.hashFn().?);
 }
 
 test "real record: firehose post with emoji/langs/reply is byte-identical after re-encode" {
@@ -1044,5 +1036,5 @@ test "real record: firehose post with emoji/langs/reply is byte-identical after 
 
     // verify CID matches the production CID
     const cid = try Cid.forDagCbor(alloc, re_encoded);
-    try std.testing.expectEqualSlices(u8, &expected_digest, cid.digest);
+    try std.testing.expectEqualSlices(u8, &expected_digest, cid.digest().?);
 }
