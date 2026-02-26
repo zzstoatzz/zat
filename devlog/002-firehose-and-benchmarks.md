@@ -35,27 +35,31 @@ both clients now rotate through multiple hosts on reconnect. the firehose defaul
 
 ## the benchmarks
 
-we built [atproto-bench](https://tangled.sh/@zzstoatzz.io/atproto-bench) — a cross-SDK benchmark that captures ~10 seconds of live firehose traffic (~2400 frames, ~12 MB), then decodes the full corpus with four SDKs. each SDK calls its real consumer API: raw frame bytes in, typed commit with decoded records out. no synthetic shortcuts.
+we built [atproto-bench](https://tangled.sh/@zzstoatzz.io/atproto-bench) — a cross-SDK benchmark that captures ~10 seconds of live firehose traffic, then decodes the full corpus with four SDKs.
 
-the results on macOS arm64, 5 measured passes over the corpus:
+every SDK does the same work per frame: decode CBOR header → decode CBOR payload → parse CAR → decode every CAR block as DAG-CBOR. block counts, error counts, and per-pass variance (min/median/max) are reported so you can verify parity.
 
-| SDK | frames/sec | MB/s |
-|-----|--------:|-----:|
-| zig (zat, arena reuse) | 1,852k | 9,079 |
-| zig (zat, alloc per frame) | 1,277k | 6,260 |
-| rust (jacquard-style) | 45k | 223 |
-| python (atproto) | 24k | 115 |
-| go (indigo) | 11k | 52 |
+the corpus is captured with a minimal CBOR header peek (check `t == "#commit"` and `ops` is non-empty) — no SDK-specific decode in the capture path, so the corpus isn't biased toward any particular decoder's capabilities.
 
-the "alloc per frame" variant is the fair cross-language comparison — fresh allocator per frame, just like the other SDKs. even so, zat is 28x faster than rust, 54x faster than python, and 120x faster than go.
+the original version of these benchmarks had work asymmetry: zat's `firehose.decodeFrame` only decoded op-linked blocks (~2.3k per corpus), while rust and go decoded all CAR blocks (~23k). python parsed CAR structure but didn't iterate blocks. the numbers below are from the corrected version where all SDKs decode every block.
 
-### why the gap
+run `just capture && just bench` in [atproto-bench](https://tangled.sh/@zzstoatzz.io/atproto-bench) to get numbers on your machine.
 
-two things compound:
+### why zat is fast
+
+three things compound:
 
 **zero-copy vs owned allocations.** when rust deserializes a `Commit`, serde allocates a new `String` for every string field and copies the entire CAR blob into a `Vec<u8>`. go's code-generated unmarshal does the same. zat returns slices pointing into the input buffer — the `repo` field is a pointer and a length, zero bytes copied.
 
-**sync vs async CAR parsing.** rust's `iroh-car` is an async library. every `next_block().await` goes through tokio's poll/wake state machine to read from an in-memory buffer. zat's CAR reader is synchronous and zero-copy. you can see it in the old numbers: rust did 501k frames/sec for just the CBOR decode (no CAR), but drops to 45k when CAR parsing kicks in.
+**block decode cardinality.** each firehose frame contains a CAR with ~10 blocks (MST nodes + records). decoding every block as DAG-CBOR is the dominant cost — it's where most of the per-frame CPU time goes across all SDKs.
+
+**sync vs async CAR parsing.** rust's `iroh-car` is an async library. every `next_block().await` goes through tokio's poll/wake state machine to read from an in-memory buffer. this is bad enough that python (via libipld, a *different* Rust library that works synchronously) outperforms the rust benchmark. the async overhead compounds on top of the per-block decode cost — ~10 awaits per frame adds up.
+
+### the go result
+
+indigo — bluesky's own production relay implementation — is the slowest of the four. go-car is synchronous (no async overhead excuse), and cbor-gen is code-generated (no reflection). the cost is allocations and GC pressure: go copies every string, every byte slice, every block into heap-allocated objects, and the garbage collector has to clean it all up. at ~10 blocks/frame, that's a lot of short-lived allocations per decode.
+
+this doesn't mean indigo is bad software — it handles the live firehose fine at ~1k events/sec. but it explains why bluesky runs beefy relay infrastructure: the decode path has no room to spare at scale.
 
 ### does this matter?
 
