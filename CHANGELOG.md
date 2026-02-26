@@ -1,5 +1,13 @@
 # changelog
 
+## 0.1.8
+
+- **fix**: NSID parser rejects TLD starting with digit (e.g. `1.0.0.127.record`)
+- **fix**: AT-URI parser validates authority (DID/handle), collection (NSID), and rkey components; rejects `#`, `?`, spaces
+- **fix**: reject high-S ECDSA signatures — atproto requires low-S normalization (BIP-62 style)
+- `verifySecp256k1` and `verifyP256` are now `pub`
+- atproto interop test suite: syntax validation (6 types), crypto signature verification (6 vectors), MST key heights (9 vectors)
+
 ## 0.1.7
 
 - slim `Cid` struct from 56 to 16 bytes — store only raw bytes, parse version/codec/digest lazily on demand
