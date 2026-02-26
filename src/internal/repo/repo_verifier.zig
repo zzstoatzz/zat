@@ -234,17 +234,18 @@ test "verify repo - zzstoatzz.io" {
     std.debug.print("verified zzstoatzz.io: {d} records, rev={s}\n", .{ result.record_count, result.commit_rev });
 }
 
-test "verify repo - pfrazee.com" {
-    // did:plc:ragtjsm2j2vknwkz3zp4oxrd on bsky.network (bluesky-hosted PDS)
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    const result = verifyRepo(arena.allocator(), "pfrazee.com") catch |err| {
-        std.debug.print("network error (expected in CI): {}\n", .{err});
-        return;
-    };
-
-    try std.testing.expectEqualStrings("did:plc:ragtjsm2j2vknwkz3zp4oxrd", result.did);
-    try std.testing.expect(result.record_count > 0);
-    std.debug.print("verified pfrazee.com: {d} records, rev={s}\n", .{ result.record_count, result.commit_rev });
-}
+// stress test: pfrazee.com (~192k records on bsky.network)
+// run manually with: zig test src/internal/repo/repo_verifier.zig --
+//   not included in `zig build test` — too slow for CI
+//
+// test "verify repo - pfrazee.com (stress)" {
+//     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+//     defer arena.deinit();
+//     const result = verifyRepo(arena.allocator(), "pfrazee.com") catch |err| {
+//         std.debug.print("network error: {}\n", .{err});
+//         return;
+//     };
+//     try std.testing.expectEqualStrings("did:plc:ragtjsm2j2vknwkz3zp4oxrd", result.did);
+//     try std.testing.expect(result.record_count > 0);
+//     std.debug.print("verified pfrazee.com: {d} records, rev={s}\n", .{ result.record_count, result.commit_rev });
+// }
