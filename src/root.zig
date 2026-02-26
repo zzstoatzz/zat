@@ -32,6 +32,11 @@ pub const mst = @import("internal/repo/mst.zig");
 pub const cbor = @import("internal/repo/cbor.zig");
 pub const car = @import("internal/repo/car.zig");
 
+// repo verification
+pub const repo_verifier = @import("internal/repo/repo_verifier.zig");
+pub const verifyRepo = repo_verifier.verifyRepo;
+pub const VerifyResult = repo_verifier.VerifyResult;
+
 // sync / streaming
 const sync = @import("internal/streaming/sync.zig");
 pub const CommitAction = sync.CommitAction;
@@ -52,5 +57,6 @@ pub const FirehoseEvent = firehose.Event;
 comptime {
     if (@import("builtin").is_test) {
         _ = @import("internal/testing/interop_tests.zig");
+        _ = @import("internal/repo/repo_verifier.zig");
     }
 }
