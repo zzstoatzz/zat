@@ -44,3 +44,10 @@ pub const car = @import("internal/car.zig");
 pub const firehose = @import("internal/firehose.zig");
 pub const FirehoseClient = firehose.FirehoseClient;
 pub const FirehoseEvent = firehose.Event;
+
+// interop tests (test-only, references resolved by build.zig lazy dependency)
+comptime {
+    if (@import("builtin").is_test) {
+        _ = @import("internal/interop_tests.zig");
+    }
+}

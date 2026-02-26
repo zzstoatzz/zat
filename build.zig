@@ -19,6 +19,35 @@ pub fn build(b: *std.Build) void {
     });
 
     const tests = b.addTest(.{ .root_module = mod });
+
+    // add interop test fixtures (lazy — only fetched when running tests)
+    if (b.lazyDependency("atproto-interop-tests", .{})) |interop| {
+        const interop_files = .{
+            // syntax fixtures
+            .{ "tid_syntax_valid", "syntax/tid_syntax_valid.txt" },
+            .{ "tid_syntax_invalid", "syntax/tid_syntax_invalid.txt" },
+            .{ "did_syntax_valid", "syntax/did_syntax_valid.txt" },
+            .{ "did_syntax_invalid", "syntax/did_syntax_invalid.txt" },
+            .{ "handle_syntax_valid", "syntax/handle_syntax_valid.txt" },
+            .{ "handle_syntax_invalid", "syntax/handle_syntax_invalid.txt" },
+            .{ "nsid_syntax_valid", "syntax/nsid_syntax_valid.txt" },
+            .{ "nsid_syntax_invalid", "syntax/nsid_syntax_invalid.txt" },
+            .{ "recordkey_syntax_valid", "syntax/recordkey_syntax_valid.txt" },
+            .{ "recordkey_syntax_invalid", "syntax/recordkey_syntax_invalid.txt" },
+            .{ "aturi_syntax_valid", "syntax/aturi_syntax_valid.txt" },
+            .{ "aturi_syntax_invalid", "syntax/aturi_syntax_invalid.txt" },
+            // crypto fixtures
+            .{ "signature_fixtures", "crypto/signature-fixtures.json" },
+            // mst fixtures
+            .{ "mst_key_heights", "mst/key_heights.json" },
+        };
+        inline for (interop_files) |entry| {
+            tests.root_module.addAnonymousImport(entry[0], .{
+                .root_source_file = interop.path(entry[1]),
+            });
+        }
+    }
+
     const run_tests = b.addRunArtifact(tests);
 
     const test_step = b.step("test", "run unit tests");
