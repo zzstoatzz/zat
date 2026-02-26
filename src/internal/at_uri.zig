@@ -13,6 +13,10 @@
 //! see: https://atproto.com/specs/at-uri-scheme
 
 const std = @import("std");
+const Did = @import("did.zig").Did;
+const Handle = @import("handle.zig").Handle;
+const Nsid = @import("nsid.zig").Nsid;
+const Rkey = @import("rkey.zig").Rkey;
 
 pub const AtUri = struct {
     /// the full uri string (borrowed, not owned)
@@ -35,6 +39,11 @@ pub const AtUri = struct {
         // must start with "at://"
         if (!std.mem.startsWith(u8, s, prefix)) return null;
 
+        // reject forbidden characters anywhere after prefix
+        for (s) |c| {
+            if (c == ' ' or c == '#' or c == '?') return null;
+        }
+
         // no trailing slash
         if (s[s.len - 1] == '/') return null;
 
@@ -44,21 +53,32 @@ pub const AtUri = struct {
         // find first slash (end of authority)
         const authority_end_rel = std.mem.indexOfScalar(u8, after_prefix, '/');
 
-        if (authority_end_rel) |ae| {
-            if (ae == 0) return null; // empty authority
+        const auth_str = after_prefix[0 .. authority_end_rel orelse after_prefix.len];
+        if (auth_str.len == 0) return null;
 
+        // authority must be a valid DID or handle
+        if (Did.parse(auth_str) == null and Handle.parse(auth_str) == null) return null;
+
+        if (authority_end_rel) |ae| {
             const after_authority = after_prefix[ae + 1 ..];
             if (after_authority.len == 0) return null; // trailing slash after authority
 
             // find second slash (end of collection)
             const collection_end_rel = std.mem.indexOfScalar(u8, after_authority, '/');
 
-            if (collection_end_rel) |ce| {
-                if (ce == 0) return null; // empty collection
-                const after_collection = after_authority[ce + 1 ..];
-                if (after_collection.len == 0) return null; // trailing slash after collection
+            const coll_str = after_authority[0 .. collection_end_rel orelse after_authority.len];
+            if (coll_str.len == 0) return null; // empty collection
 
-                // full uri: authority + collection + rkey
+            // collection must be a valid NSID
+            if (Nsid.parse(coll_str) == null) return null;
+
+            if (collection_end_rel) |ce| {
+                const rkey_str = after_authority[ce + 1 ..];
+                if (rkey_str.len == 0) return null; // trailing slash after collection
+
+                // rkey must be a valid record key
+                if (Rkey.parse(rkey_str) == null) return null;
+
                 return .{
                     .raw = s,
                     .authority_end = prefix.len + ae,

@@ -41,7 +41,7 @@ pub const Nsid = struct {
             if (c == '.') {
                 const segment = s[segment_start..i];
                 // all segments except last must be valid domain segments
-                if (!isValidDomainSegment(segment)) return null;
+                if (!isValidDomainSegment(segment, segment_count == 0)) return null;
                 segment_count += 1;
                 last_dot = i;
                 segment_start = i + 1;
@@ -77,12 +77,15 @@ pub const Nsid = struct {
         return self.raw[self.name_start..];
     }
 
-    fn isValidDomainSegment(seg: []const u8) bool {
+    fn isValidDomainSegment(seg: []const u8, is_first: bool) bool {
         // 1-63 characters
         if (seg.len == 0 or seg.len > max_segment_length) return false;
 
         // cannot start or end with hyphen
         if (seg[0] == '-' or seg[seg.len - 1] == '-') return false;
+
+        // first segment (TLD) must start with a letter
+        if (is_first and !(seg[0] >= 'a' and seg[0] <= 'z')) return false;
 
         // lowercase letters, digits, and hyphens only
         for (seg) |c| {
