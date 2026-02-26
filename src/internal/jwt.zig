@@ -219,12 +219,48 @@ fn parsePayload(allocator: std.mem.Allocator, payload_json: []const u8) !Payload
     };
 }
 
-fn verifySecp256k1(message: []const u8, sig_bytes: []const u8, public_key_raw: []const u8) !void {
+/// compare two 32-byte big-endian values: true if a > b
+fn bigEndianGt(a: [32]u8, b: [32]u8) bool {
+    for (a, b) |ab, bb| {
+        if (ab > bb) return true;
+        if (ab < bb) return false;
+    }
+    return false;
+}
+
+/// reject high-S signatures (atproto requires low-S normalization).
+/// s is high-S if s > curve_order / 2.
+fn rejectHighS(comptime half_order: [32]u8, s_bytes: [32]u8) error{HighSSignature}!void {
+    if (bigEndianGt(s_bytes, half_order)) return error.HighSSignature;
+}
+
+// secp256k1 order/2 (big-endian)
+// order = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+const secp256k1_half_order: [32]u8 = .{
+    0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x5D, 0x57, 0x6E, 0x73, 0x57, 0xA4, 0x50, 0x1D,
+    0xDF, 0xE9, 0x2F, 0x46, 0x68, 0x1B, 0x20, 0xA0,
+};
+
+// P-256 order/2 (big-endian)
+// order = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+const p256_half_order: [32]u8 = .{
+    0x7F, 0xFF, 0xFF, 0xFF, 0x80, 0x00, 0x00, 0x00,
+    0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xDE, 0x73, 0x7D, 0x56, 0xD3, 0x8B, 0xCF, 0x42,
+    0x79, 0xDC, 0xE5, 0x61, 0x7E, 0x31, 0x92, 0xA8,
+};
+
+pub fn verifySecp256k1(message: []const u8, sig_bytes: []const u8, public_key_raw: []const u8) !void {
     const Scheme = crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 
     // parse signature (r || s, 64 bytes)
     if (sig_bytes.len != 64) return error.InvalidSignature;
     const sig = Scheme.Signature.fromBytes(sig_bytes[0..64].*);
+
+    // reject high-S signatures (atproto requires low-S)
+    rejectHighS(secp256k1_half_order, sig.s) catch return error.SignatureVerificationFailed;
 
     // parse public key from SEC1 compressed format
     if (public_key_raw.len != 33) return error.InvalidPublicKey;
@@ -234,12 +270,15 @@ fn verifySecp256k1(message: []const u8, sig_bytes: []const u8, public_key_raw: [
     sig.verify(message, public_key) catch return error.SignatureVerificationFailed;
 }
 
-fn verifyP256(message: []const u8, sig_bytes: []const u8, public_key_raw: []const u8) !void {
+pub fn verifyP256(message: []const u8, sig_bytes: []const u8, public_key_raw: []const u8) !void {
     const Scheme = crypto.sign.ecdsa.EcdsaP256Sha256;
 
     // parse signature (r || s, 64 bytes)
     if (sig_bytes.len != 64) return error.InvalidSignature;
     const sig = Scheme.Signature.fromBytes(sig_bytes[0..64].*);
+
+    // reject high-S signatures (atproto requires low-S)
+    rejectHighS(p256_half_order, sig.s) catch return error.SignatureVerificationFailed;
 
     // parse public key from SEC1 compressed format
     if (public_key_raw.len != 33) return error.InvalidPublicKey;
