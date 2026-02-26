@@ -49,11 +49,13 @@ the original version of these benchmarks had work asymmetry: zat only decoded op
 
 | SDK | frames/sec (median) | MB/s | blocks/frame |
 |-----|--------:|-----:|-----:|
-| zig (zat, arena reuse) | 461,827 | 2,268.9 | 9.98 |
-| zig (zat, alloc per frame) | 395,485 | 1,890.0 | 9.98 |
-| rust (jacquard) | 42,023 | 203.5 | 9.98 |
-| python (atproto) | 24,026 | 118.0 | 9.98 |
-| go (indigo) | 10,896 | 53.3 | 9.98 |
+| zig (zat, arena reuse) | 628,091 | 3,044.8 | 9.98 |
+| zig (zat, alloc per frame) | 559,825 | 2,662.0 | 9.98 |
+| rust (raw, arena reuse) | 244,113 | 1,171.0 | 9.98 |
+| rust (raw, alloc per frame) | 186,962 | 919.4 | 9.98 |
+| rust (jacquard) | 47,881 | 238.9 | 9.98 |
+| python (atproto) | 29,675 | 146.1 | 9.98 |
+| go (indigo) | 11,548 | 58.0 | 9.98 |
 
 all SDKs: 0 errors. run-to-run variance is ~30-40% — compare ratios within a single run, not across runs.
 
@@ -61,17 +63,25 @@ all SDKs: 0 errors. run-to-run variance is ~30-40% — compare ratios within a s
 
 three things compound:
 
-**zero-copy vs owned allocations.** when rust deserializes a `Commit`, serde allocates a new `String` for every string field and copies the entire CAR blob into a `Vec<u8>`. go's code-generated unmarshal does the same. zat returns slices pointing into the input buffer — the `repo` field is a pointer and a length, zero bytes copied.
+**zero-copy vs owned allocations.** zat returns slices pointing into the input buffer — strings and byte data are a pointer and a length, zero bytes copied. the "rust (raw)" benchmark uses the same approach via minicbor's borrowed decoder, which narrows the gap from ~10x (jacquard) to ~2.5x.
 
 **block decode cardinality.** each firehose frame contains a CAR with ~10 blocks (MST nodes + records). decoding every block as DAG-CBOR is the dominant cost — it's where most of the per-frame CPU time goes across all SDKs.
 
-**arena allocation.** zat uses one arena per frame — a single `malloc` on the first frame, then `reset` (no syscall) on every subsequent frame. the "alloc per frame" variant creates and destroys an arena per frame (one `malloc` + one `free`), which is the fair comparison to what the other SDKs do. the "arena reuse" variant is the production pattern.
+**arena allocation.** zat uses one arena per frame — a single `malloc` on the first frame, then `reset` (no syscall) on every subsequent frame. rust (raw) uses bumpalo for the same pattern. the remaining ~2.5x gap is likely due to Value type size (zig's 24-byte union vs rust's larger enum), arena implementation differences, and CBOR parser codegen.
 
-### rust and python
+### how architecture affects rust
 
-jacquard uses iroh-car for CAR parsing, which is async — every `next_block().await` goes through tokio's poll/wake state machine even though the I/O is an in-memory buffer. ~10 awaits per frame adds up.
+we include two rust implementations to isolate the effect of SDK architecture:
 
-python's atproto SDK uses libipld (Rust via PyO3) under the hood, which does the entire CAR parse + per-block DAG-CBOR decode in one synchronous C-extension call. this is a different (and for this workload, faster) Rust library than what the rust benchmark uses. python beats rust here because libipld avoids the async overhead entirely.
+**rust (raw)** uses minicbor (zero-copy CBOR), a hand-rolled sync CAR parser, and bumpalo arena allocation. it matches zat's architectural choices: borrowed strings, flat map representation, no async. result: ~244k fps (arena reuse).
+
+**rust (jacquard)** is the real AT Protocol SDK. it pays for serde-based owned deserialization (`String`, `BTreeMap<String, Ipld>`), async CAR parsing (tokio poll/wake per block via iroh-car), and per-object heap allocation. result: ~48k fps — 5x slower than the raw variant on the same data.
+
+the difference between these two (~5x) is entirely SDK architecture, not language. the remaining difference between rust (raw) and zig (~2.5x) is language-level: enum layout, arena implementation, codegen.
+
+### python
+
+python's atproto SDK uses libipld (Rust via PyO3) under the hood, which does the entire CAR parse + per-block DAG-CBOR decode in one synchronous C-extension call. python beats jacquard because libipld avoids async overhead and uses a different (faster) Rust CBOR library internally.
 
 ### go
 
