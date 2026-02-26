@@ -51,6 +51,43 @@ pub fn parsePublicKey(data: []const u8) !PublicKey {
     return error.UnsupportedKeyType;
 }
 
+/// encode a raw public key with multicodec prefix
+pub fn encodePublicKey(allocator: std.mem.Allocator, key_type: KeyType, raw: []const u8) ![]u8 {
+    if (raw.len != 33) return error.InvalidKeyLength;
+
+    const result = try allocator.alloc(u8, 2 + raw.len);
+    switch (key_type) {
+        .secp256k1 => {
+            result[0] = 0xe7;
+            result[1] = 0x01;
+        },
+        .p256 => {
+            result[0] = 0x80;
+            result[1] = 0x24;
+        },
+    }
+    @memcpy(result[2..], raw);
+    return result;
+}
+
+/// format a raw public key as a did:key string
+pub fn formatDidKey(allocator: std.mem.Allocator, key_type: KeyType, raw: []const u8) ![]u8 {
+    const multibase = @import("multibase.zig");
+
+    const mc_bytes = try encodePublicKey(allocator, key_type, raw);
+    defer allocator.free(mc_bytes);
+
+    const multibase_str = try multibase.encode(allocator, .base58btc, mc_bytes);
+    defer allocator.free(multibase_str);
+
+    // "did:key:" + multibase string (which already has 'z' prefix)
+    const prefix = "did:key:";
+    const result = try allocator.alloc(u8, prefix.len + multibase_str.len);
+    @memcpy(result[0..prefix.len], prefix);
+    @memcpy(result[prefix.len..], multibase_str);
+    return result;
+}
+
 // === tests ===
 
 test "parse secp256k1 key" {
@@ -87,4 +124,62 @@ test "reject unsupported key type" {
 test "reject too short" {
     const data = [_]u8{0xe7};
     try std.testing.expectError(error.TooShort, parsePublicKey(&data));
+}
+
+test "encode-decode round-trip secp256k1" {
+    const alloc = std.testing.allocator;
+    var raw: [33]u8 = undefined;
+    raw[0] = 0x02;
+    @memset(raw[1..], 0xaa);
+
+    const encoded = try encodePublicKey(alloc, .secp256k1, &raw);
+    defer alloc.free(encoded);
+
+    const parsed = try parsePublicKey(encoded);
+    try std.testing.expectEqual(KeyType.secp256k1, parsed.key_type);
+    try std.testing.expectEqualSlices(u8, &raw, parsed.raw);
+}
+
+test "did:key round-trip secp256k1" {
+    const alloc = std.testing.allocator;
+    const multibase = @import("multibase.zig");
+
+    var raw: [33]u8 = undefined;
+    raw[0] = 0x02;
+    @memset(raw[1..], 0xcc);
+
+    const did_key_str = try formatDidKey(alloc, .secp256k1, &raw);
+    defer alloc.free(did_key_str);
+
+    // should start with "did:key:z"
+    try std.testing.expect(std.mem.startsWith(u8, did_key_str, "did:key:z"));
+
+    // parse back: strip "did:key:" prefix, decode multibase, parse multicodec
+    const multibase_str = did_key_str["did:key:".len..];
+    const mc_bytes = try multibase.decode(alloc, multibase_str);
+    defer alloc.free(mc_bytes);
+
+    const parsed = try parsePublicKey(mc_bytes);
+    try std.testing.expectEqual(KeyType.secp256k1, parsed.key_type);
+    try std.testing.expectEqualSlices(u8, &raw, parsed.raw);
+}
+
+test "did:key round-trip p256" {
+    const alloc = std.testing.allocator;
+    const multibase = @import("multibase.zig");
+
+    var raw: [33]u8 = undefined;
+    raw[0] = 0x03;
+    @memset(raw[1..], 0xdd);
+
+    const did_key_str = try formatDidKey(alloc, .p256, &raw);
+    defer alloc.free(did_key_str);
+
+    const multibase_str = did_key_str["did:key:".len..];
+    const mc_bytes = try multibase.decode(alloc, multibase_str);
+    defer alloc.free(mc_bytes);
+
+    const parsed = try parsePublicKey(mc_bytes);
+    try std.testing.expectEqual(KeyType.p256, parsed.key_type);
+    try std.testing.expectEqualSlices(u8, &raw, parsed.raw);
 }

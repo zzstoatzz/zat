@@ -252,40 +252,53 @@ const p256_half_order: [32]u8 = .{
     0x79, 0xDC, 0xE5, 0x61, 0x7E, 0x31, 0x92, 0xA8,
 };
 
-pub fn verifySecp256k1(message: []const u8, sig_bytes: []const u8, public_key_raw: []const u8) !void {
-    const Scheme = crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
+/// ECDSA signature (r || s, 64 bytes)
+pub const Signature = struct {
+    bytes: [64]u8,
+};
 
-    // parse signature (r || s, 64 bytes)
+/// sign a message with deterministic RFC 6979 ECDSA and low-S normalization
+fn signEcdsa(comptime Scheme: type, comptime Curve: type, comptime half_order: [32]u8, message: []const u8, secret_key_bytes: []const u8) !Signature {
+    if (secret_key_bytes.len != 32) return error.InvalidSecretKey;
+    const sk = Scheme.SecretKey.fromBytes(secret_key_bytes[0..32].*) catch return error.InvalidSecretKey;
+    const kp = Scheme.KeyPair.fromSecretKey(sk) catch return error.InvalidSecretKey;
+
+    var sig = kp.sign(message, null) catch return error.SigningFailed;
+
+    if (bigEndianGt(sig.s, half_order)) {
+        sig.s = Curve.scalar.neg(sig.s, .big) catch return error.SigningFailed;
+    }
+
+    return .{ .bytes = sig.toBytes() };
+}
+
+/// verify an ECDSA signature, rejecting high-S
+fn verifyEcdsa(comptime Scheme: type, comptime half_order: [32]u8, message: []const u8, sig_bytes: []const u8, public_key_raw: []const u8) !void {
     if (sig_bytes.len != 64) return error.InvalidSignature;
     const sig = Scheme.Signature.fromBytes(sig_bytes[0..64].*);
 
-    // reject high-S signatures (atproto requires low-S)
-    rejectHighS(secp256k1_half_order, sig.s) catch return error.SignatureVerificationFailed;
+    rejectHighS(half_order, sig.s) catch return error.SignatureVerificationFailed;
 
-    // parse public key from SEC1 compressed format
     if (public_key_raw.len != 33) return error.InvalidPublicKey;
     const public_key = Scheme.PublicKey.fromSec1(public_key_raw) catch return error.InvalidPublicKey;
 
-    // verify
     sig.verify(message, public_key) catch return error.SignatureVerificationFailed;
 }
 
+pub fn signSecp256k1(message: []const u8, secret_key_bytes: []const u8) !Signature {
+    return signEcdsa(crypto.sign.ecdsa.EcdsaSecp256k1Sha256, crypto.ecc.Secp256k1, secp256k1_half_order, message, secret_key_bytes);
+}
+
+pub fn signP256(message: []const u8, secret_key_bytes: []const u8) !Signature {
+    return signEcdsa(crypto.sign.ecdsa.EcdsaP256Sha256, crypto.ecc.P256, p256_half_order, message, secret_key_bytes);
+}
+
+pub fn verifySecp256k1(message: []const u8, sig_bytes: []const u8, public_key_raw: []const u8) !void {
+    return verifyEcdsa(crypto.sign.ecdsa.EcdsaSecp256k1Sha256, secp256k1_half_order, message, sig_bytes, public_key_raw);
+}
+
 pub fn verifyP256(message: []const u8, sig_bytes: []const u8, public_key_raw: []const u8) !void {
-    const Scheme = crypto.sign.ecdsa.EcdsaP256Sha256;
-
-    // parse signature (r || s, 64 bytes)
-    if (sig_bytes.len != 64) return error.InvalidSignature;
-    const sig = Scheme.Signature.fromBytes(sig_bytes[0..64].*);
-
-    // reject high-S signatures (atproto requires low-S)
-    rejectHighS(p256_half_order, sig.s) catch return error.SignatureVerificationFailed;
-
-    // parse public key from SEC1 compressed format
-    if (public_key_raw.len != 33) return error.InvalidPublicKey;
-    const public_key = Scheme.PublicKey.fromSec1(public_key_raw) catch return error.InvalidPublicKey;
-
-    // verify
-    sig.verify(message, public_key) catch return error.SignatureVerificationFailed;
+    return verifyEcdsa(crypto.sign.ecdsa.EcdsaP256Sha256, p256_half_order, message, sig_bytes, public_key_raw);
 }
 
 // === tests ===
@@ -368,4 +381,67 @@ test "reject signature with wrong key" {
 
     // should fail verification with wrong key
     try std.testing.expectError(error.SignatureVerificationFailed, jwt.verify(wrong_key));
+}
+
+test "sign and verify round-trip - secp256k1" {
+    // generate a deterministic keypair using a fixed seed
+    const Scheme = crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
+    const sk_bytes = [_]u8{
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+        0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+    };
+
+    const message = "hello atproto";
+    const sig = try signSecp256k1(message, &sk_bytes);
+
+    // verify low-S: s must be <= half_order
+    const s = sig.bytes[32..64].*;
+    try std.testing.expect(!bigEndianGt(s, secp256k1_half_order));
+
+    // verify with the corresponding public key
+    const sk = try Scheme.SecretKey.fromBytes(sk_bytes);
+    const kp = try Scheme.KeyPair.fromSecretKey(sk);
+    const pk_bytes = kp.public_key.toCompressedSec1();
+
+    try verifySecp256k1(message, &sig.bytes, &pk_bytes);
+}
+
+test "sign and verify round-trip - P-256" {
+    const Scheme = crypto.sign.ecdsa.EcdsaP256Sha256;
+    const sk_bytes = [_]u8{
+        0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+        0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
+        0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+        0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40,
+    };
+
+    const message = "hello atproto p256";
+    const sig = try signP256(message, &sk_bytes);
+
+    // verify low-S
+    const s = sig.bytes[32..64].*;
+    try std.testing.expect(!bigEndianGt(s, p256_half_order));
+
+    // verify with the corresponding public key
+    const sk = try Scheme.SecretKey.fromBytes(sk_bytes);
+    const kp = try Scheme.KeyPair.fromSecretKey(sk);
+    const pk_bytes = kp.public_key.toCompressedSec1();
+
+    try verifyP256(message, &sig.bytes, &pk_bytes);
+}
+
+test "sign produces deterministic signatures" {
+    const sk_bytes = [_]u8{
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+        0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+    };
+    const message = "deterministic test";
+
+    const sig1 = try signSecp256k1(message, &sk_bytes);
+    const sig2 = try signSecp256k1(message, &sk_bytes);
+    try std.testing.expectEqualSlices(u8, &sig1.bytes, &sig2.bytes);
 }

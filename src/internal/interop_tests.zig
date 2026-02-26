@@ -17,6 +17,10 @@ const jwt = @import("jwt.zig");
 const multibase = @import("multibase.zig");
 const multicodec = @import("multicodec.zig");
 
+// mst
+const mst = @import("mst.zig");
+const cbor = @import("cbor.zig");
+
 // === helpers ===
 
 fn LineIterator(comptime sentinel: ?u8) type {
@@ -229,24 +233,7 @@ test "interop: crypto signature verification" {
     try std.testing.expect(tested == fixtures.len);
 }
 
-// === tier 3: MST key heights ===
-
-/// compute MST tree depth for a record key.
-/// depth = count leading zero bits in SHA-256(key), divided by 2, rounded down.
-fn mstKeyHeight(key: []const u8) u32 {
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(key, &digest, .{});
-    var leading_zeros: u32 = 0;
-    for (digest) |byte| {
-        if (byte == 0) {
-            leading_zeros += 8;
-        } else {
-            leading_zeros += @clz(byte);
-            break;
-        }
-    }
-    return leading_zeros / 2;
-}
+// === tier 3: MST ===
 
 test "interop: mst key heights" {
     const allocator = std.testing.allocator;
@@ -263,7 +250,7 @@ test "interop: mst key heights" {
         const key = obj.get("key").?.string;
         const expected_height: u32 = @intCast(obj.get("height").?.integer);
 
-        const actual = mstKeyHeight(key);
+        const actual = mst.keyHeight(key);
         if (actual != expected_height) {
             std.debug.print("FAIL: key '{s}': expected height {d}, got {d}\n", .{ key, expected_height, actual });
             return error.WrongHeight;
@@ -272,4 +259,114 @@ test "interop: mst key heights" {
     }
 
     try std.testing.expect(tested > 0);
+}
+
+test "interop: mst common prefix" {
+    const allocator = std.testing.allocator;
+
+    const fixture_json = @embedFile("common_prefix");
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, fixture_json, .{});
+    defer parsed.deinit();
+
+    const fixtures = parsed.value.array.items;
+    var tested: usize = 0;
+
+    for (fixtures) |fixture| {
+        const obj = fixture.object;
+        const left = obj.get("left").?.string;
+        const right = obj.get("right").?.string;
+        const expected_len: usize = @intCast(obj.get("len").?.integer);
+
+        const actual = mst.commonPrefixLen(left, right);
+        if (actual != expected_len) {
+            std.debug.print("FAIL: commonPrefixLen('{s}', '{s}'): expected {d}, got {d}\n", .{ left, right, expected_len, actual });
+            return error.WrongPrefixLen;
+        }
+        tested += 1;
+    }
+
+    try std.testing.expect(tested == 13);
+}
+
+test "interop: mst commit proofs" {
+    const allocator = std.testing.allocator;
+
+    const fixture_json = @embedFile("commit_proofs");
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, fixture_json, .{});
+    defer parsed.deinit();
+
+    const fixtures = parsed.value.array.items;
+    var tested: usize = 0;
+
+    for (fixtures) |fixture| {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        const obj = fixture.object;
+        const comment = if (obj.get("comment")) |v| switch (v) {
+            .string => |s| s,
+            else => "?",
+        } else "?";
+
+        // parse leaf value CID
+        const leaf_value_str = obj.get("leafValue").?.string;
+        const leaf_cid = try mst.parseCidString(a, leaf_value_str);
+
+        // build initial tree from keys
+        var tree = mst.Mst.init(a);
+        const keys = obj.get("keys").?.array.items;
+        for (keys) |key_val| {
+            try tree.put(key_val.string, leaf_cid);
+        }
+
+        // verify root before commit
+        const root_before_str = obj.get("rootBeforeCommit").?.string;
+        const expected_before = try mst.parseCidString(a, root_before_str);
+
+        const actual_before = try tree.rootCid();
+        if (!std.mem.eql(u8, actual_before.raw, expected_before.raw)) {
+            std.debug.print("FAIL [{s}]: rootBeforeCommit mismatch\n", .{comment});
+            std.debug.print("  expected: {s}\n", .{root_before_str});
+            // print hex for debugging
+            std.debug.print("  expected raw ({d}): ", .{expected_before.raw.len});
+            for (expected_before.raw) |b| std.debug.print("{x:0>2}", .{b});
+            std.debug.print("\n  actual raw ({d}):   ", .{actual_before.raw.len});
+            for (actual_before.raw) |b| std.debug.print("{x:0>2}", .{b});
+            std.debug.print("\n", .{});
+            return error.RootBeforeMismatch;
+        }
+
+        // apply adds
+        const adds = obj.get("adds").?.array.items;
+        for (adds) |add_val| {
+            try tree.put(add_val.string, leaf_cid);
+        }
+
+        // apply dels
+        const dels = obj.get("dels").?.array.items;
+        for (dels) |del_val| {
+            try tree.delete(del_val.string);
+        }
+
+        // verify root after commit
+        const root_after_str = obj.get("rootAfterCommit").?.string;
+        const expected_after = try mst.parseCidString(a, root_after_str);
+
+        const actual_after = try tree.rootCid();
+        if (!std.mem.eql(u8, actual_after.raw, expected_after.raw)) {
+            std.debug.print("FAIL [{s}]: rootAfterCommit mismatch\n", .{comment});
+            std.debug.print("  expected: {s}\n", .{root_after_str});
+            std.debug.print("  expected raw ({d}): ", .{expected_after.raw.len});
+            for (expected_after.raw) |b| std.debug.print("{x:0>2}", .{b});
+            std.debug.print("\n  actual raw ({d}):   ", .{actual_after.raw.len});
+            for (actual_after.raw) |b| std.debug.print("{x:0>2}", .{b});
+            std.debug.print("\n", .{});
+            return error.RootAfterMismatch;
+        }
+
+        tested += 1;
+    }
+
+    try std.testing.expect(tested == 6);
 }

@@ -27,6 +27,9 @@ pub const Jwt = @import("internal/jwt.zig").Jwt;
 pub const multibase = @import("internal/multibase.zig");
 pub const multicodec = @import("internal/multicodec.zig");
 
+// mst
+pub const mst = @import("internal/mst.zig");
+
 // sync / firehose
 const sync = @import("internal/sync.zig");
 pub const CommitAction = sync.CommitAction;

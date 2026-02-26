@@ -1,5 +1,13 @@
 # changelog
 
+## 0.1.9
+
+- **feat**: merkle search tree (MST) — `mst.Mst` with `put`, `get`, `delete`, `rootCid`
+- **feat**: ECDSA signing — `signSecp256k1`, `signP256` with low-S normalization (RFC 6979)
+- **feat**: `did:key` construction — `multicodec.formatDidKey`, `multicodec.encodePublicKey`
+- **feat**: multibase encoding — base58btc encode, base32lower encode/decode
+- interop tests: MST common prefix (13 vectors), commit proofs (6 fixtures)
+
 ## 0.1.8
 
 - **fix**: NSID parser rejects TLD starting with digit (e.g. `1.0.0.127.record`)
