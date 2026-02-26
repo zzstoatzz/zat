@@ -39,7 +39,7 @@ we built [atproto-bench](https://tangled.sh/@zzstoatzz.io/atproto-bench) — a c
 
 every SDK does the same work per frame: decode CBOR header → decode CBOR payload → parse CAR → decode every CAR block as DAG-CBOR. block counts, error counts, and per-pass variance (min/median/max) are reported so you can verify parity.
 
-the corpus is captured with a minimal CBOR header peek (check `t == "#commit"` and `ops` is non-empty) — no SDK-specific decode in the capture path, so the corpus isn't biased toward any particular decoder's capabilities.
+the corpus is captured with a minimal CBOR header peek (check `t == "#commit"` and `ops` is non-empty) using zat's CBOR decoder. this is standard CBOR parsing — not zat's typed firehose decoder — but it does mean frames that zat's CBOR decoder rejects won't appear in the corpus. in practice, CBOR header parsing is the least likely step to diverge across implementations.
 
 the original version of these benchmarks had work asymmetry: zat's `firehose.decodeFrame` only decoded op-linked blocks (~2.3k per corpus), while rust and go decoded all CAR blocks (~23k). python parsed CAR structure but didn't iterate blocks. the numbers below are from the corrected version where all SDKs decode every block.
 
