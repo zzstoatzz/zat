@@ -6,7 +6,7 @@
 //! see: https://atproto.com/specs/xrpc
 
 const std = @import("std");
-const Nsid = @import("nsid.zig").Nsid;
+const Nsid = @import("../syntax/nsid.zig").Nsid;
 const HttpTransport = @import("transport.zig").HttpTransport;
 
 pub const XrpcClient = struct {

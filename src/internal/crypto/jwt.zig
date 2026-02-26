@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const crypto = std.crypto;
-const json = @import("json.zig");
+const json = @import("../xrpc/json.zig");
 const multibase = @import("multibase.zig");
 const multicodec = @import("multicodec.zig");
 

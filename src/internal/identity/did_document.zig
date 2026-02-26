@@ -8,7 +8,7 @@
 //! see: https://atproto.com/specs/did
 
 const std = @import("std");
-const Did = @import("did.zig").Did;
+const Did = @import("../syntax/did.zig").Did;
 
 pub const DidDocument = struct {
     allocator: std.mem.Allocator,

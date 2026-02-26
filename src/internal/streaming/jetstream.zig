@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const websocket = @import("websocket");
-const json_helpers = @import("json.zig");
+const json_helpers = @import("../xrpc/json.zig");
 const sync = @import("sync.zig");
 
 const mem = std.mem;

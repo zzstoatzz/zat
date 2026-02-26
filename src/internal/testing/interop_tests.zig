@@ -5,21 +5,21 @@
 const std = @import("std");
 
 // types under test
-const Tid = @import("tid.zig").Tid;
-const Did = @import("did.zig").Did;
-const Handle = @import("handle.zig").Handle;
-const Nsid = @import("nsid.zig").Nsid;
-const Rkey = @import("rkey.zig").Rkey;
-const AtUri = @import("at_uri.zig").AtUri;
+const Tid = @import("../syntax/tid.zig").Tid;
+const Did = @import("../syntax/did.zig").Did;
+const Handle = @import("../syntax/handle.zig").Handle;
+const Nsid = @import("../syntax/nsid.zig").Nsid;
+const Rkey = @import("../syntax/rkey.zig").Rkey;
+const AtUri = @import("../syntax/at_uri.zig").AtUri;
 
 // crypto
-const jwt = @import("jwt.zig");
-const multibase = @import("multibase.zig");
-const multicodec = @import("multicodec.zig");
+const jwt = @import("../crypto/jwt.zig");
+const multibase = @import("../crypto/multibase.zig");
+const multicodec = @import("../crypto/multicodec.zig");
 
-// mst
-const mst = @import("mst.zig");
-const cbor = @import("cbor.zig");
+// repo
+const mst = @import("../repo/mst.zig");
+const cbor = @import("../repo/cbor.zig");
 
 // === helpers ===
 

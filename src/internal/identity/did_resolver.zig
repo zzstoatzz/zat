@@ -5,9 +5,9 @@
 //! see: https://atproto.com/specs/did
 
 const std = @import("std");
-const Did = @import("did.zig").Did;
+const Did = @import("../syntax/did.zig").Did;
 const DidDocument = @import("did_document.zig").DidDocument;
-const HttpTransport = @import("transport.zig").HttpTransport;
+const HttpTransport = @import("../xrpc/transport.zig").HttpTransport;
 
 pub const DidResolver = struct {
     allocator: std.mem.Allocator,

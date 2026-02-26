@@ -9,7 +9,7 @@
 
 const std = @import("std");
 const cbor = @import("cbor.zig");
-const multibase = @import("multibase.zig");
+const multibase = @import("../crypto/multibase.zig");
 const Allocator = std.mem.Allocator;
 
 /// compute MST tree layer for a key.

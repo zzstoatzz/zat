@@ -11,8 +11,8 @@
 
 const std = @import("std");
 const websocket = @import("websocket");
-const cbor = @import("cbor.zig");
-const car = @import("car.zig");
+const cbor = @import("../repo/cbor.zig");
+const car = @import("../repo/car.zig");
 const sync = @import("sync.zig");
 
 const mem = std.mem;

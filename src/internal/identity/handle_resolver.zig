@@ -9,9 +9,9 @@
 //! see: https://atproto.com/specs/handle
 
 const std = @import("std");
-const Handle = @import("handle.zig").Handle;
-const Did = @import("did.zig").Did;
-const HttpTransport = @import("transport.zig").HttpTransport;
+const Handle = @import("../syntax/handle.zig").Handle;
+const Did = @import("../syntax/did.zig").Did;
+const HttpTransport = @import("../xrpc/transport.zig").HttpTransport;
 
 pub const HandleResolver = struct {
     allocator: std.mem.Allocator,

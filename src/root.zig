@@ -3,54 +3,54 @@
 //! parsing and validation for AT Protocol string formats.
 //! DID resolution for did:plc and did:web.
 
-// string primitives
-pub const Tid = @import("internal/tid.zig").Tid;
-pub const Did = @import("internal/did.zig").Did;
-pub const Handle = @import("internal/handle.zig").Handle;
-pub const Nsid = @import("internal/nsid.zig").Nsid;
-pub const Rkey = @import("internal/rkey.zig").Rkey;
-pub const AtUri = @import("internal/at_uri.zig").AtUri;
+// syntax primitives
+pub const Tid = @import("internal/syntax/tid.zig").Tid;
+pub const Did = @import("internal/syntax/did.zig").Did;
+pub const Handle = @import("internal/syntax/handle.zig").Handle;
+pub const Nsid = @import("internal/syntax/nsid.zig").Nsid;
+pub const Rkey = @import("internal/syntax/rkey.zig").Rkey;
+pub const AtUri = @import("internal/syntax/at_uri.zig").AtUri;
 
-// did resolution
-pub const DidDocument = @import("internal/did_document.zig").DidDocument;
-pub const DidResolver = @import("internal/did_resolver.zig").DidResolver;
-pub const HandleResolver = @import("internal/handle_resolver.zig").HandleResolver;
+// identity resolution
+pub const DidDocument = @import("internal/identity/did_document.zig").DidDocument;
+pub const DidResolver = @import("internal/identity/did_resolver.zig").DidResolver;
+pub const HandleResolver = @import("internal/identity/handle_resolver.zig").HandleResolver;
 
 // xrpc
-pub const XrpcClient = @import("internal/xrpc.zig").XrpcClient;
+pub const XrpcClient = @import("internal/xrpc/xrpc.zig").XrpcClient;
 
 // json helpers
-pub const json = @import("internal/json.zig");
+pub const json = @import("internal/xrpc/json.zig");
 
-// service auth
-pub const Jwt = @import("internal/jwt.zig").Jwt;
-pub const multibase = @import("internal/multibase.zig");
-pub const multicodec = @import("internal/multicodec.zig");
+// crypto
+pub const Jwt = @import("internal/crypto/jwt.zig").Jwt;
+pub const multibase = @import("internal/crypto/multibase.zig");
+pub const multicodec = @import("internal/crypto/multicodec.zig");
 
-// mst
-pub const mst = @import("internal/mst.zig");
+// repo
+pub const mst = @import("internal/repo/mst.zig");
+pub const cbor = @import("internal/repo/cbor.zig");
+pub const car = @import("internal/repo/car.zig");
 
-// sync / firehose
-const sync = @import("internal/sync.zig");
+// sync / streaming
+const sync = @import("internal/streaming/sync.zig");
 pub const CommitAction = sync.CommitAction;
 pub const EventKind = sync.EventKind;
 pub const AccountStatus = sync.AccountStatus;
 
 // jetstream
-pub const jetstream = @import("internal/jetstream.zig");
+pub const jetstream = @import("internal/streaming/jetstream.zig");
 pub const JetstreamClient = jetstream.JetstreamClient;
 pub const JetstreamEvent = jetstream.Event;
 
 // firehose (raw CBOR event stream)
-pub const cbor = @import("internal/cbor.zig");
-pub const car = @import("internal/car.zig");
-pub const firehose = @import("internal/firehose.zig");
+pub const firehose = @import("internal/streaming/firehose.zig");
 pub const FirehoseClient = firehose.FirehoseClient;
 pub const FirehoseEvent = firehose.Event;
 
 // interop tests (test-only, references resolved by build.zig lazy dependency)
 comptime {
     if (@import("builtin").is_test) {
-        _ = @import("internal/interop_tests.zig");
+        _ = @import("internal/testing/interop_tests.zig");
     }
 }
