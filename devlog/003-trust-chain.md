@@ -26,7 +26,7 @@ alongside that: ECDSA signing (`signSecp256k1`, `signP256` with RFC 6979 determi
 
 ### code organization (0.2.0)
 
-22 files in a flat `src/internal/` was getting unwieldy. we reorganized into domain subdirectories following bluesky's own boundaries (from [bluesky-social/indigo](https://github.com/bluesky-social/indigo)):
+22 files in a flat `src/internal/` was getting unwieldy. we reorganized into domain subdirectories following bluesky's own boundaries (from the [TypeScript SDK](https://github.com/bluesky-social/atproto/tree/main/packages)):
 
 ```
 internal/
@@ -39,7 +39,7 @@ internal/
   testing/    — interop_tests
 ```
 
-the groupings aren't arbitrary. in both indigo (Go) and the TypeScript SDK, `syntax` is pure parsing with zero deps, `identity` handles network resolution, `crypto` is P-256 + K-256, and `repo` contains the MST, CAR, and CBOR together (CBOR isn't a standalone package — it lives with the types that need it).
+the groupings aren't arbitrary. the TypeScript SDK has `syntax`, `crypto`, `identity`, `repo`, and `xrpc` as distinct packages — `syntax` is pure parsing with zero deps, `identity` handles network resolution, `crypto` is P-256 + K-256, and `repo` contains the MST, CAR, and CBOR together (CBOR isn't a standalone package — it lives with the types that need it).
 
 ## the repo verifier
 

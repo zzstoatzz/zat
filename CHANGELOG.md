@@ -3,7 +3,7 @@
 ## 0.2.0
 
 - **feat**: end-to-end repo verification — `verifyRepo(allocator, identifier)` exercises the full AT Protocol trust chain: handle → DID → DID document → signing key → fetch repo CAR → verify commit signature → walk MST → rebuild tree → CID match
-- **refactor**: organize `src/internal/` into domain subdirectories following bluesky-social/indigo: `syntax/`, `crypto/`, `identity/`, `repo/`, `xrpc/`, `streaming/`, `testing/`
+- **refactor**: organize `src/internal/` into domain subdirectories following the [TypeScript SDK](https://github.com/bluesky-social/atproto/tree/main/packages): `syntax/`, `crypto/`, `identity/`, `repo/`, `xrpc/`, `streaming/`, `testing/`
 
 ## 0.1.9
 
