@@ -15,6 +15,8 @@ const docs = [_]DocEntry{
 /// devlog entries
 const devlog = [_]DocEntry{
     .{ .path = "/devlog/001", .file = "devlog/001-self-publishing-docs.md" },
+    .{ .path = "/devlog/002", .file = "devlog/002-firehose-and-benchmarks.md" },
+    .{ .path = "/devlog/003", .file = "devlog/003-trust-chain.md" },
 };
 
 pub fn main() !void {

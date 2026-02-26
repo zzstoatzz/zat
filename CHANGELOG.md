@@ -1,5 +1,10 @@
 # changelog
 
+## 0.2.0
+
+- **feat**: end-to-end repo verification — `verifyRepo(allocator, identifier)` exercises the full AT Protocol trust chain: handle → DID → DID document → signing key → fetch repo CAR → verify commit signature → walk MST → rebuild tree → CID match
+- **refactor**: organize `src/internal/` into domain subdirectories following bluesky-social/indigo: `syntax/`, `crypto/`, `identity/`, `repo/`, `xrpc/`, `streaming/`, `testing/`
+
 ## 0.1.9
 
 - **feat**: merkle search tree (MST) — `mst.Mst` with `put`, `get`, `delete`, `rootCid`
