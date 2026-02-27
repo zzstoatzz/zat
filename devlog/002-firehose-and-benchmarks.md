@@ -29,35 +29,49 @@ once the firehose decoder worked, we profiled and optimized:
 - **zero-copy everywhere** — CBOR strings and byte strings are slices into the input buffer, not copies. CIDs reference the raw bytes directly. the only allocations are for array/map containers (which go into the arena).
 - **inline map key reading** — CBOR map keys in DAG-CBOR are always text strings, so we inline the key read instead of going through the full `decodeAt` → `Value` union construction per key.
 
+### CID hash verification (0.2.1)
+
+`car.read()` now SHA-256 hashes each block and compares against the digest in the CID. this is the correct behavior for untrusted data from the network — it proves block content wasn't corrupted or tampered with. `readWithOptions(.{ .verify_block_hashes = false })` skips verification for trusted local data.
+
+of the SDKs we benchmarked, only zat and go's indigo (via go-car) verify CID hashes. rust's iroh-car and python's libipld do not.
+
 ### round-robin host rotation (0.1.6)
 
 both clients now rotate through multiple hosts on reconnect. the firehose defaults to `bsky.network` plus three `firehose.network` regional endpoints. jetstream defaults to 12+ hosts. backoff resets when switching to a fresh host.
 
 ## the benchmarks
 
-we built [atproto-bench](https://tangled.sh/@zzstoatzz.io/atproto-bench) — a cross-SDK benchmark that captures ~10 seconds of live firehose traffic, then decodes the full corpus with four SDKs.
+we built [atproto-bench](https://tangled.sh/@zzstoatzz.io/atproto-bench) — a cross-SDK benchmark that captures ~10 seconds of live firehose traffic, then decodes the full corpus with each SDK.
 
 every SDK does the same work per frame: decode CBOR header → decode CBOR payload → parse CAR → decode every CAR block as DAG-CBOR. block counts and error counts are reported per SDK so you can verify parity. per-pass variance (min/median/max) is reported so you can see how stable the numbers are.
 
 the corpus is captured with a CBOR header peek (check `t == "#commit"` and `ops` is non-empty) using zat's CBOR decoder. this is standard CBOR parsing — not zat's typed firehose decoder — but it does mean frames that zat's CBOR decoder rejects won't appear in the corpus.
 
-the original version of these benchmarks had work asymmetry: zat only decoded op-linked blocks (~2.3k per corpus), while rust and go decoded all CAR blocks (~23k). python parsed CAR structure but didn't iterate blocks. the numbers below are from the corrected version where all SDKs decode every block.
-
-### results
+### results: production-correct (with CID verification)
 
 3,298 frames (16.2 MB), 5 measured passes, macOS arm64 (M3 Max):
 
 | SDK | frames/sec (median) | MB/s | blocks/frame |
 |-----|--------:|-----:|-----:|
-| zig (zat, arena reuse) | 628,091 | 3,044.8 | 9.98 |
-| zig (zat, alloc per frame) | 559,825 | 2,662.0 | 9.98 |
+| zig (zat, arena reuse) | 311,428 | 1,482.8 | 9.98 |
+| go (indigo) | 15,560 | 75.3 | 9.98 |
+
+both SDKs: 0 errors. zat is ~20x faster than indigo when both do the full correct work (decode + SHA-256 CID verification per block).
+
+### results: decode-only (no CID verification)
+
+| SDK | frames/sec (median) | MB/s | blocks/frame |
+|-----|--------:|-----:|-----:|
+| zig (zat, arena reuse) | 630,543 | 3,094.7 | 9.98 |
+| zig (zat, alloc per frame) | 525,906 | 2,552.0 | 9.98 |
 | rust (raw, arena reuse) | 244,113 | 1,171.0 | 9.98 |
 | rust (raw, alloc per frame) | 186,962 | 919.4 | 9.98 |
 | rust (jacquard) | 47,881 | 238.9 | 9.98 |
+| go (raw, fxamacker/cbor) | 41,398 | 200.7 | 9.98 |
 | python (atproto) | 29,675 | 146.1 | 9.98 |
-| go (indigo) | 11,548 | 58.0 | 9.98 |
+| go (indigo) | 15,560 | 75.3 | 9.98 |
 
-all SDKs: 0 errors. run-to-run variance is ~30-40% — compare ratios within a single run, not across runs.
+all SDKs: 0 errors. run-to-run variance is ~30-40% — compare ratios within a single run, not across runs. indigo's number is the same in both tables because go-car v1 always verifies.
 
 ### why zat is fast
 
@@ -79,15 +93,19 @@ we include two rust implementations to isolate the effect of SDK architecture:
 
 the difference between these two (~5x) is entirely SDK architecture, not language. the remaining difference between rust (raw) and zig (~2.5x) is language-level: enum layout, arena implementation, codegen.
 
+### how architecture affects go
+
+we include two go implementations:
+
+**go (raw)** uses fxamacker/cbor (struct-tag-based decode, no reflection for known types), a hand-rolled sync CAR parser that skips CID hash verification, and no indigo dependency. result: ~41k fps — 3.5x faster than indigo.
+
+**go (indigo)** uses cbor-gen (code-generated, already reflection-free at the frame level) but pays for go-car's per-block SHA-256 CID verification and cbornode's reflection-based DAG-CBOR decode via the unmaintained refmt library. result: ~15k fps.
+
+the go-raw improvement comes from two things: a faster per-block CBOR library (fxamacker vs refmt) and skipping CID hashing. GC pressure is the fundamental ceiling in Go — every string, byte slice, and decoded value is heap-allocated, and Go has no arena allocator.
+
 ### python
 
 python's atproto SDK uses libipld (Rust via PyO3) under the hood, which does the entire CAR parse + per-block DAG-CBOR decode in one synchronous C-extension call. python beats jacquard because libipld avoids async overhead and uses a different (faster) Rust CBOR library internally.
-
-### go
-
-indigo — bluesky's own production relay — is the slowest. go-car is synchronous (no async overhead excuse), and cbor-gen is code-generated (no reflection). the cost is GC pressure: every string, byte slice, and block is a heap allocation that the garbage collector has to sweep. at ~10 blocks/frame, that's a lot of short-lived objects per decode.
-
-indigo handles the live firehose fine at ~1k events/sec. but it explains why bluesky runs beefy relay infrastructure.
 
 ### does this matter?
 
