@@ -1,5 +1,11 @@
 # changelog
 
+## 0.2.5
+
+- **feat**: O(1) block lookup in CAR parser — `StringHashMap` index built during `read()`/`readWithOptions()`, `findBlock()` uses index instead of linear scan
+- **fix**: `verifyRepo` bypasses default 2 MB / 10k block limits so large repos (e.g. pfrazee.com at 70 MB / 243k blocks) actually work
+- **docs**: devlog 005 — clarify Rust ecosystem (rsky, jacquard, hand-rolled RustCrypto)
+
 ## 0.2.4
 
 - **feat**: configurable CAR size limits — `max_size` and `max_blocks` options in `readWithOptions` for large repo verification

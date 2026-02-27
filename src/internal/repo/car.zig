@@ -23,6 +23,9 @@ pub const Block = struct {
 pub const Car = struct {
     roots: []const cbor.Cid,
     blocks: []const Block,
+    /// CID bytes → block data for O(1) lookup. built by read/readWithOptions.
+    /// empty for manually-constructed Cars (findBlock falls back to linear scan).
+    block_index: std.StringHashMapUnmanaged([]const u8) = .empty,
 };
 
 pub const CarError = error{
@@ -87,6 +90,7 @@ pub fn readWithOptions(allocator: Allocator, data: []const u8, options: ReadOpti
 
     // read blocks
     var blocks: std.ArrayList(Block) = .{};
+    var block_index: std.StringHashMapUnmanaged([]const u8) = .empty;
 
     while (pos < data.len) {
         // block: [varint total_len] [CID bytes] [data bytes]
@@ -115,6 +119,7 @@ pub fn readWithOptions(allocator: Allocator, data: []const u8, options: ReadOpti
             .cid_raw = cid_bytes,
             .data = content,
         });
+        try block_index.put(allocator, cid_bytes, content);
 
         pos = block_end;
     }
@@ -122,6 +127,7 @@ pub fn readWithOptions(allocator: Allocator, data: []const u8, options: ReadOpti
     return .{
         .roots = try roots.toOwnedSlice(allocator),
         .blocks = try blocks.toOwnedSlice(allocator),
+        .block_index = block_index,
     };
 }
 
@@ -166,8 +172,11 @@ fn cidLength(data: []const u8) ?usize {
     return pos + digest_len_usize;
 }
 
-/// find a block by matching CID bytes
+/// find a block by matching CID bytes.
+/// uses the hash index when available (O(1)), falls back to linear scan for
+/// manually-constructed Cars without an index.
 pub fn findBlock(c: Car, cid_raw: []const u8) ?[]const u8 {
+    if (c.block_index.count() > 0) return c.block_index.get(cid_raw);
     for (c.blocks) |block| {
         if (std.mem.eql(u8, block.cid_raw, cid_raw)) return block.data;
     }

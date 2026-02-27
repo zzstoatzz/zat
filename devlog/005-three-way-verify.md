@@ -22,7 +22,7 @@ all three implementations do the same work: resolve the handle, resolve the DID,
 
 **go (indigo)** — uses bluesky's official Go SDK: `identity.BaseDirectory` for handle/DID resolution, `repo.LoadRepoFromCAR` for parsing, `commit.VerifySignature` for sig verify, `MST.Walk()` + `MST.RootCID()` for MST.
 
-**rust (RustCrypto)** — manual implementation since no indigo-equivalent exists in Rust. HTTP + DNS TXT handle resolution, plc.directory DID resolution, hand-rolled CAR parser with SHA-256, k256/p256 for ECDSA, recursive CBOR MST traversal. skips MST rebuild (no crate for it).
+**rust (RustCrypto)** — hand-rolled using the same low-level crates that [rsky](https://github.com/blacksky-algorithms/rsky) (Rudy Fraser / BlackSky) uses internally: k256/p256 for ECDSA, serde_ipld_dagcbor for CBOR, sha2 for hashing. no Rust equivalent of indigo's all-in-one `LoadRepoFromCAR` exists yet — rsky provides the building blocks (rsky-repo for MST/CAR, rsky-crypto for signatures, rsky-identity for DID resolution) and [jacquard](https://tangled.sh/@nonbinary.computer/jacquard) (@nonbinary.computer) also has MST/CAR/identity support, but the end-to-end verify pipeline is assembled manually here. HTTP + DNS TXT handle resolution, plc.directory DID resolution, hand-rolled CAR parser with SHA-256, recursive CBOR MST traversal. skips MST rebuild (no crate for it in either rsky or jacquard yet).
 
 ## the O(n) bug
 
@@ -50,12 +50,12 @@ network time (handle + DID resolution + repo fetch) dominates total wall clock �
 
 the story is different from the decode benchmarks. there, zig was 19x faster than Go. here, the gap is ~1.4x. the reason: signature verification is a single ECDSA verify (sub-millisecond for everyone), and CAR parsing on a 70 MB file is less dominated by per-block overhead than the firehose's thousands of small CARs. the MST rebuild (zig-only) is the biggest single cost — serializing 192k entries into a fresh tree and hashing.
 
-go's MST walk is fastest (5.8ms vs zig's 45.5ms) because indigo's `LoadRepoFromCAR` builds the MST in memory during CAR parse. walking it is just pointer chasing. zig and rust decode MST nodes from raw CBOR on each visit.
+go's MST walk is fastest (5.8ms vs zig's 45.5ms) because indigo's MST nodes are decoded from CBOR once on first access and cached as Go structs — subsequent traversal is pure pointer chasing. zig and rust decode MST nodes from raw CBOR on each visit. the same pattern explains go's 0.0ms MST rebuild: `LoadRepoFromCAR` pre-computes and caches the root CID during load.
 
 ## what changed in zat
 
-the O(n) block lookup was the only code change — CAR blocks are now indexed in a `StringHashMap` instead of a flat slice. the rest of the verify pipeline (handle resolution, DID resolution, CAR parsing, signature verification, MST walk + rebuild) was already working from 0.2.0.
+two changes in the CAR parser: blocks are now indexed in a `StringHashMap` for O(1) lookup (the O(n) linear scan was the 79s → 48ms fix), and `verifyRepo` now bypasses the default 2 MB / 10k block limits so large repos like pfrazee's 70 MB actually work.
 
-also exported the `jwt` module directly (not just the `Jwt` type) so the verify tool can call `jwt.verifySecp256k1` without reaching into internals. and made CAR size limits configurable (`max_size`, `max_blocks` in `readWithOptions`) — pfrazee's 70 MB repo blows past the 2 MB default.
+also exported the `jwt` module directly (not just the `Jwt` type) so the verify tool can call `jwt.verifySecp256k1` without reaching into internals, and made CAR size limits configurable (`max_size`, `max_blocks` in `readWithOptions`) for callers who need custom limits.
 
 the three-way comparison and chart tooling live in [atproto-bench](https://tangled.sh/@zzstoatzz.io/atproto-bench).

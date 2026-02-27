@@ -79,8 +79,11 @@ pub fn verifyRepo(caller_alloc: Allocator, identifier: []const u8) !VerifyResult
     // 5. fetch repo CAR
     const car_bytes = try fetchRepo(allocator, pds_endpoint, did_str);
 
-    // 6. parse CAR
-    const repo_car = car.read(allocator, car_bytes) catch return error.InvalidCommit;
+    // 6. parse CAR (no size limits — we fetched this ourselves from the PDS)
+    const repo_car = car.readWithOptions(allocator, car_bytes, .{
+        .max_size = car_bytes.len,
+        .max_blocks = car_bytes.len, // effectively unlimited
+    }) catch return error.InvalidCommit;
     if (repo_car.roots.len == 0) return error.NoRootsInCar;
 
     // 7. find commit block
