@@ -101,7 +101,7 @@ we include two go implementations:
 
 **go (indigo)** uses cbor-gen (code-generated, already reflection-free at the frame level) but pays for go-car's per-block SHA-256 CID verification and cbornode's reflection-based DAG-CBOR decode via the unmaintained refmt library. result: ~15k fps.
 
-the go-raw improvement comes from two things: a faster per-block CBOR library (fxamacker vs refmt) and skipping CID hashing. GC pressure is the fundamental ceiling in Go — every string, byte slice, and decoded value is heap-allocated, and Go has no arena allocator.
+the go-raw improvement comes from two things: a faster per-block CBOR library (fxamacker vs refmt) and skipping CID hashing. GC pressure is the fundamental ceiling in Go — every string, byte slice, and decoded value is heap-allocated, and Go's experimental arena package is on hold and not recommended for production.
 
 ### python
 
