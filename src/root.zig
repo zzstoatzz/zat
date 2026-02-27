@@ -23,7 +23,8 @@ pub const XrpcClient = @import("internal/xrpc/xrpc.zig").XrpcClient;
 pub const json = @import("internal/xrpc/json.zig");
 
 // crypto
-pub const Jwt = @import("internal/crypto/jwt.zig").Jwt;
+pub const jwt = @import("internal/crypto/jwt.zig");
+pub const Jwt = jwt.Jwt;
 pub const multibase = @import("internal/crypto/multibase.zig");
 pub const multicodec = @import("internal/crypto/multicodec.zig");
 

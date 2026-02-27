@@ -45,6 +45,10 @@ pub const ReadOptions = struct {
     /// this is the correct behavior for untrusted data (e.g. from the network).
     /// set to false only for trusted local data where you want raw decode speed.
     verify_block_hashes: bool = true,
+    /// max total CAR size in bytes. null = use default (2 MB).
+    max_size: ?usize = null,
+    /// max number of blocks. null = use default (10,000).
+    max_blocks: ?usize = null,
 };
 
 /// parse a CAR v1 file from raw bytes
@@ -54,7 +58,7 @@ pub fn read(allocator: Allocator, data: []const u8) CarError!Car {
 
 /// parse a CAR v1 file from raw bytes with options
 pub fn readWithOptions(allocator: Allocator, data: []const u8, options: ReadOptions) CarError!Car {
-    if (data.len > max_blocks_size) return error.BlocksTooLarge;
+    if (data.len > (options.max_size orelse max_blocks_size)) return error.BlocksTooLarge;
 
     var pos: usize = 0;
 
@@ -105,7 +109,7 @@ pub fn readWithOptions(allocator: Allocator, data: []const u8, options: ReadOpti
             try verifyBlockHash(cid_bytes, content);
         }
 
-        if (blocks.items.len >= max_block_count) return error.TooManyBlocks;
+        if (blocks.items.len >= (options.max_blocks orelse max_block_count)) return error.TooManyBlocks;
 
         try blocks.append(allocator, .{
             .cid_raw = cid_bytes,
