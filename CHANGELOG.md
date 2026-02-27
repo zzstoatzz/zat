@@ -1,5 +1,19 @@
 # changelog
 
+## 0.2.3
+
+- **docs**: devlog 004 — the sig-verify saga (k256 5×52-bit field, Fermat scalar inversion, three-way bench with rsky)
+- changelog backfill for 0.2.1 and 0.2.2
+
+## 0.2.2
+
+- **feat**: CAR parser enforces size limits — 2MB max on blocks field, max block count. matches indigo's limits for production parity.
+
+## 0.2.1
+
+- **feat**: CID hash verification in CAR parser — `car.read()` SHA-256 hashes each block and compares against the CID digest. proves block content wasn't corrupted or tampered with. `readWithOptions(.{ .verify_block_hashes = false })` to skip for trusted local data.
+- **fix**: remove pfrazee.com from default test suite (network-dependent)
+
 ## 0.2.0
 
 - **feat**: end-to-end repo verification — `verifyRepo(allocator, identifier)` exercises the full AT Protocol trust chain: handle → DID → DID document → signing key → fetch repo CAR → verify commit signature → walk MST → rebuild tree → CID match
