@@ -22,7 +22,7 @@ all three implementations do the same work: resolve the handle, resolve the DID,
 
 **go (indigo)** — uses bluesky's official Go SDK: `identity.BaseDirectory` for handle/DID resolution, `repo.LoadRepoFromCAR` for parsing, `commit.VerifySignature` for sig verify, `MST.Walk()` + `MST.RootCID()` for MST.
 
-**rust (RustCrypto)** — hand-rolled using the same low-level crates that [rsky](https://github.com/blacksky-algorithms/rsky) (Rudy Fraser / BlackSky) uses internally: k256/p256 for ECDSA, serde_ipld_dagcbor for CBOR, sha2 for hashing. no Rust equivalent of indigo's all-in-one `LoadRepoFromCAR` exists yet — rsky provides the building blocks (rsky-repo for MST/CAR, rsky-crypto for signatures, rsky-identity for DID resolution) and [jacquard](https://tangled.sh/@nonbinary.computer/jacquard) (@nonbinary.computer) also has MST/CAR/identity support, but the end-to-end verify pipeline is assembled manually here. HTTP + DNS TXT handle resolution, plc.directory DID resolution, hand-rolled CAR parser with SHA-256, recursive CBOR MST traversal. skips MST rebuild (no crate for it in either rsky or jacquard yet).
+**rust ([rsky](https://github.com/blacksky-algorithms/rsky) stack)** — uses the same low-level crates that [rsky](https://github.com/blacksky-algorithms/rsky) (Rudy Fraser / BlackSky) uses internally: k256/p256 for ECDSA, serde_ipld_dagcbor for CBOR, sha2 for hashing. rsky is a full AT Protocol implementation in Rust (PDS, relay, feed generator, labeler) plus library crates (rsky-repo, rsky-crypto, rsky-identity). [jacquard](https://tangled.sh/@nonbinary.computer/jacquard) (@nonbinary.computer) also has MST/CAR/identity support. the end-to-end verify pipeline here is assembled manually from the low-level crates — no equivalent of indigo's all-in-one `LoadRepoFromCAR` exists yet. skips MST rebuild (no crate for it in either rsky or jacquard yet).
 
 ## the O(n) bug
 
@@ -43,7 +43,7 @@ _pfrazee.com — 192,161 records, 243,491 blocks, 70.6 MB CAR, macOS arm64 (M3 M
 | SDK | CAR parse | sig verify | MST walk+verify | compute total |
 |-----|----------:|----------:|----------------:|-------------:|
 | zig (zat) | 82.8ms | 0.6ms | 39.3ms | **122.7ms** |
-| rust (RustCrypto) | 301.0ms | 0.2ms | 120.9ms | **422.1ms** |
+| rust (rsky stack) | 301.0ms | 0.2ms | 120.9ms | **422.1ms** |
 | go (indigo) | 424.7ms | 0.2ms | 9.3ms | **434.2ms** |
 
 network time (handle + DID resolution + repo fetch) dominates total wall clock — 8-20 seconds depending on PDS response time. compute is under 500ms for all three.
