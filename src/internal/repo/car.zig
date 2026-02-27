@@ -31,10 +31,23 @@ pub const CarError = error{
     InvalidCid,
     UnexpectedEof,
     OutOfMemory,
+    BadBlockHash,
+};
+
+pub const ReadOptions = struct {
+    /// verify that each block's content hashes to its CID.
+    /// this is the correct behavior for untrusted data (e.g. from the network).
+    /// set to false only for trusted local data where you want raw decode speed.
+    verify_block_hashes: bool = true,
 };
 
 /// parse a CAR v1 file from raw bytes
 pub fn read(allocator: Allocator, data: []const u8) CarError!Car {
+    return readWithOptions(allocator, data, .{});
+}
+
+/// parse a CAR v1 file from raw bytes with options
+pub fn readWithOptions(allocator: Allocator, data: []const u8, options: ReadOptions) CarError!Car {
     var pos: usize = 0;
 
     // read header length (unsigned varint)
@@ -77,9 +90,16 @@ pub fn read(allocator: Allocator, data: []const u8) CarError!Car {
         const cid_len = cidLength(block_data) orelse return error.InvalidCid;
         if (cid_len > block_data.len) return error.InvalidCid;
 
+        const cid_bytes = block_data[0..cid_len];
+        const content = block_data[cid_len..];
+
+        if (options.verify_block_hashes) {
+            try verifyBlockHash(cid_bytes, content);
+        }
+
         try blocks.append(allocator, .{
-            .cid_raw = block_data[0..cid_len],
-            .data = block_data[cid_len..],
+            .cid_raw = cid_bytes,
+            .data = content,
         });
 
         pos = block_end;
@@ -89,6 +109,27 @@ pub fn read(allocator: Allocator, data: []const u8) CarError!Car {
         .roots = try roots.toOwnedSlice(allocator),
         .blocks = try blocks.toOwnedSlice(allocator),
     };
+}
+
+/// verify that block content hashes to the digest in its CID
+fn verifyBlockHash(cid_bytes: []const u8, content: []const u8) CarError!void {
+    const cid = cbor.Cid{ .raw = cid_bytes };
+    const hash_fn = cid.hashFn() orelse return error.InvalidCid;
+
+    // identity hash (0x00) — digest IS the content, no hashing needed
+    if (hash_fn == cbor.HashFn.identity) return;
+
+    // only SHA-256 supported
+    if (hash_fn != cbor.HashFn.sha2_256) return error.BadBlockHash;
+
+    const expected = cid.digest() orelse return error.InvalidCid;
+    if (expected.len != 32) return error.BadBlockHash;
+
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    var computed: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(content, &computed, .{});
+
+    if (!std.mem.eql(u8, &computed, expected)) return error.BadBlockHash;
 }
 
 /// determine the byte length of a CID at the start of data
@@ -240,7 +281,8 @@ test "read minimal CAR" {
     @memcpy(car_buf[car_pos..][0..block_content.len], &block_content);
     car_pos += block_content.len;
 
-    const car_file = try read(alloc, car_buf[0..car_pos]);
+    // this test uses a fake digest, so skip verification
+    const car_file = try readWithOptions(alloc, car_buf[0..car_pos], .{ .verify_block_hashes = false });
 
     try std.testing.expectEqual(@as(usize, 1), car_file.blocks.len);
     try std.testing.expectEqual(@as(usize, block_content.len), car_file.blocks[0].data.len);
@@ -343,6 +385,35 @@ test "write → read round-trip with CBOR block content" {
     const decoded = try cbor.decodeAll(alloc, found);
     try std.testing.expectEqualStrings("hello from CAR writer", decoded.getString("text").?);
     try std.testing.expectEqualStrings("app.bsky.feed.post", decoded.getString("$type").?);
+}
+
+test "read rejects block with bad hash" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // create a valid CAR, then corrupt the block content
+    const record_bytes = try cbor.encodeAlloc(alloc, .{ .map = &.{
+        .{ .key = "text", .value = .{ .text = "original" } },
+    } });
+    const cid = try cbor.Cid.forDagCbor(alloc, record_bytes);
+
+    // write a CAR with the correct CID but wrong data
+    const tampered_data = "tampered";
+    const tampered_car = Car{
+        .roots = &.{cid},
+        .blocks = &.{
+            .{ .cid_raw = cid.raw, .data = tampered_data },
+        },
+    };
+    const car_bytes = try writeAlloc(alloc, tampered_car);
+
+    // should fail with verification on (default)
+    try std.testing.expectError(error.BadBlockHash, read(alloc, car_bytes));
+
+    // should succeed with verification off
+    const parsed = try readWithOptions(alloc, car_bytes, .{ .verify_block_hashes = false });
+    try std.testing.expectEqual(@as(usize, 1), parsed.blocks.len);
 }
 
 test "findBlock returns null for missing CID" {
