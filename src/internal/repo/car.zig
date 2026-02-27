@@ -32,7 +32,13 @@ pub const CarError = error{
     UnexpectedEof,
     OutOfMemory,
     BadBlockHash,
+    BlocksTooLarge,
+    TooManyBlocks,
 };
+
+/// match indigo's safety limits
+const max_blocks_size: usize = 2 * 1024 * 1024; // 2 MB
+const max_block_count: usize = 10_000;
 
 pub const ReadOptions = struct {
     /// verify that each block's content hashes to its CID.
@@ -48,6 +54,8 @@ pub fn read(allocator: Allocator, data: []const u8) CarError!Car {
 
 /// parse a CAR v1 file from raw bytes with options
 pub fn readWithOptions(allocator: Allocator, data: []const u8, options: ReadOptions) CarError!Car {
+    if (data.len > max_blocks_size) return error.BlocksTooLarge;
+
     var pos: usize = 0;
 
     // read header length (unsigned varint)
@@ -96,6 +104,8 @@ pub fn readWithOptions(allocator: Allocator, data: []const u8, options: ReadOpti
         if (options.verify_block_hashes) {
             try verifyBlockHash(cid_bytes, content);
         }
+
+        if (blocks.items.len >= max_block_count) return error.TooManyBlocks;
 
         try blocks.append(allocator, .{
             .cid_raw = cid_bytes,
