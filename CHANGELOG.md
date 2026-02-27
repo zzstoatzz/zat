@@ -1,5 +1,11 @@
 # changelog
 
+## 0.2.6
+
+- **feat**: specialized MST decoder — `decodeMstNode()` parses known MST CBOR schema directly, zero-copy byte slicing, avoids generic `Value` union construction
+- **feat**: in-walk MST structure verification — `walkAndVerifyMst` checks key heights during traversal instead of full tree rebuild. MST step: 218ms → 39ms (5.5x), compute total: 300ms → 123ms (2.4x)
+- **docs**: devlog 005 — updated benchmark numbers and chart
+
 ## 0.2.5
 
 - **feat**: O(1) block lookup in CAR parser — `StringHashMap` index built during `read()`/`readWithOptions()`, `findBlock()` uses index instead of linear scan

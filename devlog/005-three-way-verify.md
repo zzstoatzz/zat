@@ -11,14 +11,14 @@ handle → DID → DID document → signing key
                                     ↓
 repo CAR → commit → signature ← verified against key
                 ↓
-         MST root CID → walk nodes → rebuild tree → CID match
+         MST root CID → walk nodes → verify key heights → structure proven
 ```
 
-all three implementations do the same work: resolve the handle, resolve the DID, extract the signing key, fetch the repo CAR, parse every block with SHA-256 CID verification, verify the commit signature, walk the MST to count records, and (where possible) rebuild the MST to verify the root CID.
+all three implementations do the same work: resolve the handle, resolve the DID, extract the signing key, fetch the repo CAR, parse every block with SHA-256 CID verification, verify the commit signature, and walk the MST to count records and verify structure.
 
 ## the implementations
 
-**zig (zat)** — uses zat's own primitives end to end: `HandleResolver`, `DidResolver`, `car.read()` with CID verification, `jwt.verifySecp256k1`, `mst.Mst` for walk + rebuild.
+**zig (zat)** — uses zat's own primitives end to end: `HandleResolver`, `DidResolver`, `car.read()` with CID verification + O(1) block index, `jwt.verifySecp256k1`, specialized `decodeMstNode` for walk + in-walk key height verification.
 
 **go (indigo)** — uses bluesky's official Go SDK: `identity.BaseDirectory` for handle/DID resolution, `repo.LoadRepoFromCAR` for parsing, `commit.VerifySignature` for sig verify, `MST.Walk()` + `MST.RootCID()` for MST.
 
@@ -36,26 +36,30 @@ result: 79s → 48ms (zig), 14s → 125ms (rust).
 
 ## results
 
-_pfrazee.com — 192,144 records, 243,470 blocks, 70.6 MB CAR, macOS arm64 (M3 Max)_
+_pfrazee.com — 192,161 records, 243,491 blocks, 70.6 MB CAR, macOS arm64 (M3 Max)_
 
 <img src="https://tangled.org/zat.dev/zat/raw/main/devlog/img/verify-compute.svg" alt="trust chain compute breakdown" width="790">
 
-| SDK | CAR parse | sig verify | MST walk | MST rebuild | compute total |
-|-----|----------:|----------:|---------:|------------:|-------------:|
-| zig (zat) | 81.6ms | 0.6ms | 45.5ms | 172.6ms | **300.4ms** |
-| go (indigo) | 403.8ms | 0.4ms | 5.8ms | 0.0ms | **410.0ms** |
-| rust (RustCrypto) | 301.0ms | 0.2ms | 120.9ms | N/A | **422.1ms** |
+| SDK | CAR parse | sig verify | MST walk+verify | compute total |
+|-----|----------:|----------:|----------------:|-------------:|
+| zig (zat) | 82.8ms | 0.6ms | 39.3ms | **122.7ms** |
+| go (indigo) | 424.7ms | 0.2ms | 9.3ms | **434.2ms** |
+| rust (RustCrypto) | 301.0ms | 0.2ms | 120.9ms | **422.1ms** |
 
 network time (handle + DID resolution + repo fetch) dominates total wall clock — 8-20 seconds depending on PDS response time. compute is under 500ms for all three.
 
-the story is different from the decode benchmarks. there, zig was 19x faster than Go. here, the gap is ~1.4x. the reason: signature verification is a single ECDSA verify (sub-millisecond for everyone), and CAR parsing on a 70 MB file is less dominated by per-block overhead than the firehose's thousands of small CARs. the MST rebuild (zig-only) is the biggest single cost — serializing 192k entries into a fresh tree and hashing.
+zig's compute total is 3.5x faster than Go and 3.4x faster than Rust. the gap comes from two places: CAR parsing (zig's inline varint + SHA-256 pipeline vs Go's reflection-heavy CBOR and Rust's serde overhead), and MST verification (specialized decoder + in-walk key height checks vs Go's cached-struct walk).
 
-go's MST walk is fastest (5.8ms vs zig's 45.5ms) because indigo's MST nodes are decoded from CBOR once on first access and cached as Go structs — subsequent traversal is pure pointer chasing. zig and rust decode MST nodes from raw CBOR on each visit. the same pattern explains go's 0.0ms MST rebuild: `LoadRepoFromCAR` pre-computes and caches the root CID during load.
+go's MST walk is still fastest in isolation (9.3ms vs zig's 39.3ms) because indigo's MST nodes are decoded from CBOR once on first access and cached as Go structs — subsequent traversal is pure pointer chasing. but zig's specialized `decodeMstNode` is much closer than the old generic CBOR approach was (previously 45.5ms walk + 172.6ms rebuild = 218ms). the key insight: a full MST rebuild is unnecessary when you can verify each key's tree layer is deterministically correct during the walk — combined with CAR block CID verification (which proves data integrity), this is equivalent.
 
 ## what changed in zat
 
-two changes in the CAR parser: blocks are now indexed in a `StringHashMap` for O(1) lookup (the O(n) linear scan was the 79s → 48ms fix), and `verifyRepo` now bypasses the default 2 MB / 10k block limits so large repos like pfrazee's 70 MB actually work.
+**O(1) block lookup** — CAR blocks are now indexed in a `StringHashMap` during parse. the old `findBlock()` was a linear scan through 243k blocks; MST walk calls it once per node (~50k nodes). this was the 79s → 48ms fix.
 
-also exported the `jwt` module directly (not just the `Jwt` type) so the verify tool can call `jwt.verifySecp256k1` without reaching into internals, and made CAR size limits configurable (`max_size`, `max_blocks` in `readWithOptions`) for callers who need custom limits.
+**specialized MST decoder** — `decodeMstNode()` parses the known MST node CBOR schema directly (`map(2) { "e": array[...], "l": CID|null }`), avoiding the generic `cbor.decodeAll()` path that builds `Value` unions and `MapEntry` arrays. all byte data is zero-copy (slices into the input buffer). only allocation: the entries array.
+
+**in-walk structure verification** — instead of collecting all records and rebuilding the tree from scratch (192k `tree.put()` calls + serialize + hash), `walkAndVerifyMst` checks each key's `keyHeight()` against the node's expected layer during traversal. combined with the CAR parser's per-block SHA-256 CID verification (which proves data integrity), this is equivalent to a full rebuild for proving canonical structure. result: MST walk+rebuild went from 218ms → 39ms (5.5x).
+
+**size limit fix** — `verifyRepo` now bypasses the default 2 MB / 10k block limits so large repos like pfrazee's 70 MB actually work.
 
 the three-way comparison and chart tooling live in [atproto-bench](https://tangled.sh/@zzstoatzz.io/atproto-bench).

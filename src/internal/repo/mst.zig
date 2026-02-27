@@ -546,6 +546,169 @@ pub const Mst = struct {
     }
 };
 
+// === specialized MST node decoder ===
+//
+// parses the known MST node CBOR schema directly, avoiding generic Value
+// union construction. all byte data is zero-copy (slices into input buffer).
+// only allocation: the entries array.
+//
+// MST node schema:
+//   map(2) { "e": array [ map(4) {k,p,t,v}, ... ], "l": CID|null }
+
+pub const MstNodeData = struct {
+    left: ?[]const u8, // raw CID bytes, or null
+    entries: []const MstEntryData,
+};
+
+pub const MstEntryData = struct {
+    key_suffix: []const u8,
+    prefix_len: usize,
+    tree: ?[]const u8, // raw CID bytes, or null
+    value: []const u8, // raw CID bytes
+};
+
+pub fn decodeMstNode(allocator: Allocator, data: []const u8) !MstNodeData {
+    var r = MstReader{ .data = data, .pos = 0 };
+
+    const map_count = try r.expectMap();
+    if (map_count != 2) return error.InvalidMstNode;
+
+    // "e" key
+    const key_e = try r.readTextString();
+    if (!std.mem.eql(u8, key_e, "e")) return error.InvalidMstNode;
+
+    // entries array
+    const entries_count = try r.expectArray();
+    const entries = try allocator.alloc(MstEntryData, entries_count);
+    for (entries) |*entry| {
+        entry.* = try readMstEntry(&r);
+    }
+
+    // "l" key
+    const key_l = try r.readTextString();
+    if (!std.mem.eql(u8, key_l, "l")) return error.InvalidMstNode;
+
+    const left = try r.readCidOrNull();
+
+    return .{ .left = left, .entries = entries };
+}
+
+fn readMstEntry(r: *MstReader) !MstEntryData {
+    const map_count = try r.expectMap();
+    if (map_count != 4) return error.InvalidMstNode;
+
+    // "k" → key suffix (byte string)
+    _ = try r.readTextString();
+    const key_suffix = try r.readByteString();
+
+    // "p" → prefix length (unsigned int)
+    _ = try r.readTextString();
+    const prefix_len = try r.readUnsigned();
+
+    // "t" → right subtree CID or null
+    _ = try r.readTextString();
+    const tree = try r.readCidOrNull();
+
+    // "v" → value CID
+    _ = try r.readTextString();
+    const value = try r.readCid();
+
+    return .{
+        .key_suffix = key_suffix,
+        .prefix_len = @intCast(prefix_len),
+        .tree = tree,
+        .value = value,
+    };
+}
+
+const MstReader = struct {
+    data: []const u8,
+    pos: usize,
+
+    fn expectMap(self: *MstReader) !usize {
+        return self.readMajorWithArg(5);
+    }
+
+    fn expectArray(self: *MstReader) !usize {
+        return self.readMajorWithArg(4);
+    }
+
+    fn readTextString(self: *MstReader) ![]const u8 {
+        const len = try self.readMajorWithArg(3);
+        if (self.pos + len > self.data.len) return error.InvalidMstNode;
+        const result = self.data[self.pos .. self.pos + len];
+        self.pos += len;
+        return result;
+    }
+
+    fn readByteString(self: *MstReader) ![]const u8 {
+        const len = try self.readMajorWithArg(2);
+        if (self.pos + len > self.data.len) return error.InvalidMstNode;
+        const result = self.data[self.pos .. self.pos + len];
+        self.pos += len;
+        return result;
+    }
+
+    fn readUnsigned(self: *MstReader) !u64 {
+        return self.readMajorWithArg(0);
+    }
+
+    fn readCidOrNull(self: *MstReader) !?[]const u8 {
+        if (self.pos >= self.data.len) return error.InvalidMstNode;
+        if (self.data[self.pos] == 0xf6) {
+            self.pos += 1;
+            return null;
+        }
+        return try self.readCid();
+    }
+
+    fn readCid(self: *MstReader) ![]const u8 {
+        // tag(42) encodes as 0xd8 0x2a
+        if (self.pos + 1 >= self.data.len) return error.InvalidMstNode;
+        if (self.data[self.pos] != 0xd8 or self.data[self.pos + 1] != 0x2a)
+            return error.InvalidMstNode;
+        self.pos += 2;
+        const bytes = try self.readByteString();
+        if (bytes.len < 1 or bytes[0] != 0x00) return error.InvalidMstNode;
+        return bytes[1..]; // skip 0x00 identity multibase prefix
+    }
+
+    fn readMajorWithArg(self: *MstReader, expected_major: u3) !usize {
+        if (self.pos >= self.data.len) return error.InvalidMstNode;
+        const b = self.data[self.pos];
+        self.pos += 1;
+        const major: u3 = @truncate(b >> 5);
+        if (major != expected_major) return error.InvalidMstNode;
+        const additional: u5 = @truncate(b);
+        return self.readArgValue(additional);
+    }
+
+    fn readArgValue(self: *MstReader, additional: u5) !usize {
+        if (additional < 24) return @as(usize, additional);
+        if (additional == 24) {
+            if (self.pos >= self.data.len) return error.InvalidMstNode;
+            const val = self.data[self.pos];
+            self.pos += 1;
+            return @as(usize, val);
+        }
+        if (additional == 25) {
+            if (self.pos + 2 > self.data.len) return error.InvalidMstNode;
+            const val = std.mem.readInt(u16, self.data[self.pos..][0..2], .big);
+            self.pos += 2;
+            return @as(usize, val);
+        }
+        if (additional == 26) {
+            if (self.pos + 4 > self.data.len) return error.InvalidMstNode;
+            const val = std.mem.readInt(u32, self.data[self.pos..][0..4], .big);
+            self.pos += 4;
+            return @as(usize, val);
+        }
+        return error.InvalidMstNode;
+    }
+};
+
+pub const MstDecodeError = error{InvalidMstNode} || Allocator.Error;
+
 // === tests ===
 
 test "keyHeight" {
