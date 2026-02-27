@@ -5,7 +5,7 @@ AT Protocol building blocks for zig.
 <details>
 <summary><strong>this readme is an ATProto record</strong></summary>
 
-→ [view in zat.dev's repository](https://at-me.zzstoatzz.io/view?handle=zat.dev)
+> [view in zat.dev's repository](https://at-me.zzstoatzz.io/view?handle=zat.dev)
 
 zat publishes these docs as [`site.standard.document`](https://standard.site) records, signed by its DID.
 
@@ -49,35 +49,176 @@ if (zat.AtUri.parse(uri_string)) |uri| {
 </details>
 
 <details>
-<summary><strong>did resolution</strong> - resolve did:plc and did:web to documents</summary>
+<summary><strong>identity resolution</strong> - resolve handles and DIDs to documents</summary>
 
 ```zig
-var resolver = zat.DidResolver.init(allocator);
-defer resolver.deinit();
+// handle → DID
+var handle_resolver = zat.HandleResolver.init(allocator);
+defer handle_resolver.deinit();
+const did = try handle_resolver.resolve(zat.Handle.parse("bsky.app").?);
+defer allocator.free(did);
 
-const did = zat.Did.parse("did:plc:z72i7hdynmk6r22z27h6tvur").?;
-var doc = try resolver.resolve(did);
+// DID → document
+var did_resolver = zat.DidResolver.init(allocator);
+defer did_resolver.deinit();
+var doc = try did_resolver.resolve(zat.Did.parse("did:plc:z72i7hdynmk6r22z27h6tvur").?);
 defer doc.deinit();
 
-const handle = doc.handle();           // "bsky.app"
-const pds = doc.pdsEndpoint();         // "https://..."
-const key = doc.signingKey();          // verification method
+const pds = doc.pdsEndpoint();       // "https://..."
+const key = doc.signingKey();         // verification method
 ```
+
+supports did:plc (via plc.directory) and did:web. handle resolution via HTTP well-known and DNS TXT.
 
 </details>
 
 <details>
-<summary><strong>handle resolution</strong> - resolve handles to DIDs via HTTP well-known</summary>
+<summary><strong>CBOR codec</strong> - DAG-CBOR encoding and decoding</summary>
 
 ```zig
-var resolver = zat.HandleResolver.init(allocator);
-defer resolver.deinit();
+// decode
+const decoded = try zat.cbor.decode(allocator, bytes);
+defer decoded.deinit();
 
-const handle = zat.Handle.parse("bsky.app").?;
-const did = try resolver.resolve(handle);
-defer allocator.free(did);
-// did = "did:plc:z72i7hdynmk6r22z27h6tvur"
+// navigate values
+const text = decoded.value.getStr("text");
+const cid = decoded.value.getCid("data");
+
+// encode (deterministic key ordering)
+const encoded = try zat.cbor.encodeAlloc(allocator, value);
+defer allocator.free(encoded);
 ```
+
+full DAG-CBOR support: maps, arrays, byte strings, text strings, integers, floats, booleans, null, CID tags (tag 42). deterministic encoding with sorted keys for signature verification.
+
+</details>
+
+<details>
+<summary><strong>CAR codec</strong> - Content Addressable aRchive parsing with CID verification</summary>
+
+```zig
+// parse with SHA-256 CID verification (default)
+const parsed = try zat.car.read(allocator, car_bytes);
+defer parsed.deinit();
+
+const root_cid = parsed.roots[0];
+for (parsed.blocks.items) |block| {
+    // block.cid_raw, block.data
+}
+
+// skip verification for trusted local data
+const fast = try zat.car.readWithOptions(allocator, car_bytes, .{
+    .verify_block_hashes = false,
+});
+```
+
+enforces size limits (configurable `max_size`, `max_blocks`) matching indigo's production defaults.
+
+</details>
+
+<details>
+<summary><strong>MST</strong> - Merkle Search Tree</summary>
+
+```zig
+var tree = zat.mst.Mst.init(allocator);
+defer tree.deinit();
+
+try tree.put(allocator, "app.bsky.feed.post/abc123", value_cid);
+const found = tree.get("app.bsky.feed.post/abc123");
+try tree.delete(allocator, "app.bsky.feed.post/abc123");
+
+// compute root CID (serialize → hash → CID)
+const root = try tree.rootCid(allocator);
+```
+
+the core data structure of an atproto repo. key layer derived from leading zero bits of SHA-256(key), nodes serialized with prefix compression.
+
+</details>
+
+<details>
+<summary><strong>crypto</strong> - signing, verification, key encoding</summary>
+
+```zig
+// JWT verification
+var token = try zat.Jwt.parse(allocator, token_string);
+defer token.deinit();
+try token.verify(public_key_multibase);
+
+// ECDSA signature verification (P-256 and secp256k1)
+try zat.jwt.verifySecp256k1(hash, signature, public_key);
+try zat.jwt.verifyP256(hash, signature, public_key);
+
+// multibase/multicodec key parsing
+const key_bytes = try zat.multibase.decode(allocator, "zQ3sh...");
+defer allocator.free(key_bytes);
+const parsed = try zat.multicodec.parsePublicKey(key_bytes);
+// parsed.key_type: .secp256k1 or .p256
+// parsed.raw: 33-byte compressed public key
+```
+
+ES256 (P-256) and ES256K (secp256k1) with low-S normalization. RFC 6979 deterministic signing. `did:key` construction and multibase encoding.
+
+</details>
+
+<details>
+<summary><strong>repo verification</strong> - full AT Protocol trust chain</summary>
+
+```zig
+const result = try zat.verifyRepo(allocator, "pfrazee.com");
+defer result.deinit();
+
+// result.did, result.signing_key, result.pds_endpoint
+// result.record_count, result.block_count
+// result.commit_verified (signature check passed)
+// result.root_cid_match (MST rebuild matches commit)
+```
+
+given a handle or DID, resolves identity, fetches the repo, parses every CAR block with SHA-256 verification, verifies the commit signature, walks the MST, and rebuilds the tree to verify the root CID.
+
+</details>
+
+<details>
+<summary><strong>firehose client</strong> - raw CBOR event stream from relay</summary>
+
+```zig
+var client = zat.FirehoseClient.init(allocator, .{});
+defer client.deinit();
+
+try client.connect();
+while (try client.next()) |event| {
+    switch (event.header.type) {
+        .commit => {
+            const car_data = try zat.car.read(allocator, event.body.blocks);
+            // process blocks...
+        },
+        else => {},
+    }
+}
+```
+
+connects to `com.atproto.sync.subscribeRepos` via WebSocket. decodes binary CBOR frames into typed events. round-robin host rotation with backoff.
+
+</details>
+
+<details>
+<summary><strong>jetstream client</strong> - typed JSON event stream</summary>
+
+```zig
+var client = zat.JetstreamClient.init(allocator, .{
+    .wanted_collections = &.{"app.bsky.feed.post"},
+});
+defer client.deinit();
+
+try client.connect();
+while (try client.next()) |event| {
+    if (event.commit) |commit| {
+        const record = commit.record;
+        // process...
+    }
+}
+```
+
+connects to jetstream (bluesky's JSON event stream). typed events, automatic reconnection with cursor tracking, round-robin across community relays.
 
 </details>
 
@@ -102,30 +243,6 @@ if (response.ok()) {
 </details>
 
 <details>
-<summary><strong>sync types</strong> - enums for firehose/event stream consumption</summary>
-
-```zig
-// use in struct definitions for automatic json parsing:
-const RepoOp = struct {
-    action: zat.CommitAction,  // .create, .update, .delete
-    path: []const u8,
-    cid: ?[]const u8,
-};
-
-// then exhaustive switch:
-switch (op.action) {
-    .create, .update => processUpsert(op),
-    .delete => processDelete(op),
-}
-```
-
-- **CommitAction** - `.create`, `.update`, `.delete`
-- **EventKind** - `.commit`, `.sync`, `.identity`, `.account`, `.info`
-- **AccountStatus** - `.takendown`, `.suspended`, `.deleted`, `.deactivated`, `.desynchronized`, `.throttled`
-
-</details>
-
-<details>
 <summary><strong>json helpers</strong> - navigate nested json without verbose if-chains</summary>
 
 ```zig
@@ -146,42 +263,17 @@ const post = try zat.json.extractAt(FeedPost, allocator, value, .{"post"});
 
 </details>
 
-<details>
-<summary><strong>jwt verification</strong> - verify service auth tokens</summary>
+## benchmarks
 
-```zig
-var jwt = try zat.Jwt.parse(allocator, token_string);
-defer jwt.deinit();
+zat is benchmarked against Go (indigo), Rust (rsky), and Python (atproto) in [atproto-bench](https://tangled.sh/@zzstoatzz.io/atproto-bench):
 
-// check claims
-if (jwt.isExpired()) return error.TokenExpired;
-if (!std.mem.eql(u8, jwt.payload.aud, expected_audience)) return error.InvalidAudience;
-
-// verify signature against issuer's public key (from DID document)
-try jwt.verify(public_key_multibase);
-```
-
-supports ES256 (P-256) and ES256K (secp256k1) signing algorithms.
-
-</details>
-
-<details>
-<summary><strong>multibase decoding</strong> - decode public keys from DID documents</summary>
-
-```zig
-const key_bytes = try zat.multibase.decode(allocator, "zQ3sh...");
-defer allocator.free(key_bytes);
-
-const parsed = try zat.multicodec.parsePublicKey(key_bytes);
-// parsed.key_type: .secp256k1 or .p256
-// parsed.raw: 33-byte compressed public key
-```
-
-</details>
+- **decode**: 290k frames/sec (zig) vs 39k (rust) vs 15k (go) — with CID hash verification
+- **sig-verify**: 15k–19k verifies/sec across all three — ECDSA is table stakes
+- **trust chain**: full repo verification in ~300ms compute (zig) vs ~410ms (go) vs ~422ms (rust)
 
 ## specs
 
-validation follows [atproto.com/specs](https://atproto.com/specs/atp).
+validation follows [atproto.com/specs](https://atproto.com/specs/atp). passes the [atproto interop test suite](https://github.com/bluesky-social/atproto-interop-tests) (syntax, crypto, MST vectors).
 
 ## versioning
 
@@ -197,4 +289,4 @@ MIT
 
 ---
 
-[roadmap](docs/roadmap.md) · [changelog](CHANGELOG.md)
+[devlog](devlog/) · [changelog](CHANGELOG.md)

@@ -1,5 +1,12 @@
 # changelog
 
+## 0.2.4
+
+- **feat**: configurable CAR size limits — `max_size` and `max_blocks` options in `readWithOptions` for large repo verification
+- **feat**: export `jwt` module (not just `Jwt` type) for direct access to `verifySecp256k1`/`verifyP256`
+- **docs**: devlog 005 — three-way trust chain verification (zig vs Go vs Rust)
+- **docs**: README rewrite — added CBOR, CAR, MST, firehose, jetstream, signing, repo verification
+
 ## 0.2.3
 
 - **docs**: devlog 004 — the sig-verify saga (k256 5×52-bit field, Fermat scalar inversion, three-way bench with rsky)

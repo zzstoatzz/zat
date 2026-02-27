@@ -38,6 +38,8 @@ result: 79s → 48ms (zig), 14s → 125ms (rust).
 
 _pfrazee.com — 192,144 records, 243,470 blocks, 70.6 MB CAR, macOS arm64 (M3 Max)_
 
+<img src="img/verify-compute.svg" alt="trust chain compute breakdown" width="790">
+
 | SDK | CAR parse | sig verify | MST walk | MST rebuild | compute total |
 |-----|----------:|----------:|---------:|------------:|-------------:|
 | zig (zat) | 81.6ms | 0.6ms | 45.5ms | 172.6ms | **300.4ms** |
