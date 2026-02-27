@@ -73,6 +73,27 @@ both SDKs: 0 errors. zat is ~20x faster than indigo when both do the full correc
 
 all SDKs: 0 errors. run-to-run variance is ~30-40% — compare ratios within a single run, not across runs. indigo's number is the same in both tables because go-car v1 always verifies.
 
+### is the gap real?
+
+the ~20x between zat and indigo (both verifying CID hashes) is large enough to be suspicious. we traced indigo's full decode path at the instruction level to check whether indigo does correctness work that zat skips.
+
+**what both do per frame:** decode full CBOR payload (all commit fields), parse CAR header and blocks, parse CID structure for each block, SHA-256 hash each block against its CID, decode every block as DAG-CBOR.
+
+**what neither does:** DAG-CBOR deterministic encoding validation (indigo's refmt doesn't check this either), signature verification, MST validation.
+
+**only asymmetry:** indigo enforces size limits on CBOR maps and a 2MB cap on the blocks field — integer comparisons, effectively free.
+
+the gap is entirely implementation cost, not correctness differences. it compounds from:
+
+| factor | indigo | zat | approx cost |
+|--------|--------|-----|-------------|
+| per-block CBOR | refmt: token pump → reflection → `reflect.SetMapIndex` per entry | hand-written, direct dispatch | ~3-4x |
+| strings/bytes | Go `string` heap alloc per value | zero-copy slices into input buffer | ~2-3x |
+| memory | per-object GC'd heap; every map, array, int is boxed | arena allocator, 24-byte `Value` union | ~2-3x |
+| CAR reads | `make([]byte, n)` + copy per block; CID parsed twice | reads from input slice; CID parsed once | ~1.5x |
+
+indigo's `cbor-gen` (code-generated unmarshal for the commit struct) is fast — the bottleneck is `cbornode.DecodeInto` which uses refmt (unmaintained, reflection-based) for the ~10 per-block DAG-CBOR decodes per frame.
+
 ### why zat is fast
 
 three things compound:
