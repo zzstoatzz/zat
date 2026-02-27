@@ -52,18 +52,10 @@ the story is different from the decode benchmarks. there, zig was 19x faster tha
 
 go's MST walk is fastest (5.8ms vs zig's 45.5ms) because indigo's `LoadRepoFromCAR` builds the MST in memory during CAR parse. walking it is just pointer chasing. zig and rust decode MST nodes from raw CBOR on each visit.
 
-## the chart tool
+## what changed in zat
 
-added a script (`scripts/verify_chart.py`) that parses `just verify` output and generates SVG charts — stacked horizontal bars with a dark theme. two variants: compute-only (the interesting comparison) and total (dominated by network). see the [atproto-bench README](https://tangled.sh/@zzstoatzz.io/atproto-bench) for the charts.
+the O(n) block lookup was the only code change — CAR blocks are now indexed in a `StringHashMap` instead of a flat slice. the rest of the verify pipeline (handle resolution, DID resolution, CAR parsing, signature verification, MST walk + rebuild) was already working from 0.2.0.
 
-```sh
-just chart pfrazee.com    # run verify + generate SVGs
-```
+also exported the `jwt` module directly (not just the `Jwt` type) so the verify tool can call `jwt.verifySecp256k1` without reaching into internals. and made CAR size limits configurable (`max_size`, `max_blocks` in `readWithOptions`) — pfrazee's 70 MB repo blows past the 2 MB default.
 
-## what's in this release
-
-- **go-verify**: full trust chain verification using indigo
-- **rust-verify**: full trust chain verification using RustCrypto + hand-rolled CAR/MST
-- **zig verify**: O(1) block lookup fix (HashMap instead of linear scan)
-- **scripts/verify_chart.py**: SVG chart generation from verify output
-- **justfile**: `just verify`, `just chart` recipes
+the three-way comparison and chart tooling live in [atproto-bench](https://tangled.sh/@zzstoatzz.io/atproto-bench).
