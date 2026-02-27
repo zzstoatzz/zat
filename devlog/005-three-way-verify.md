@@ -43,8 +43,8 @@ _pfrazee.com — 192,161 records, 243,491 blocks, 70.6 MB CAR, macOS arm64 (M3 M
 | SDK | CAR parse | sig verify | MST walk+verify | compute total |
 |-----|----------:|----------:|----------------:|-------------:|
 | zig (zat) | 82.8ms | 0.6ms | 39.3ms | **122.7ms** |
-| go (indigo) | 424.7ms | 0.2ms | 9.3ms | **434.2ms** |
 | rust (RustCrypto) | 301.0ms | 0.2ms | 120.9ms | **422.1ms** |
+| go (indigo) | 424.7ms | 0.2ms | 9.3ms | **434.2ms** |
 
 network time (handle + DID resolution + repo fetch) dominates total wall clock — 8-20 seconds depending on PDS response time. compute is under 500ms for all three.
 

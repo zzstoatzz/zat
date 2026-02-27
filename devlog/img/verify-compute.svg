@@ -16,21 +16,21 @@
 <rect x="260.2" y="55" width="47.1" height="38" fill="#c55a11" rx="3"/>
 <text x="283.7" y="78.0" text-anchor="middle" fill="white" font-size="9" font-weight="500">MST</text>
 <text x="317.3" y="79.0" fill="#a0a0a0" font-size="12" font-weight="500">123ms</text>
-<!-- go: CAR 424.7ms + sig 0.2ms + MST walk 9.3ms = 434.2ms -->
-<text x="146" y="137.0" text-anchor="end" fill="#c0c0c0" font-size="13">go (indigo)</text>
-<rect x="160.0" y="113" width="508.8" height="38" fill="#e8944a" rx="3"/>
-<text x="414.4" y="136.0" text-anchor="middle" fill="white" font-size="10" font-weight="500">CAR parse</text>
-<rect x="668.8" y="113" width="1.0" height="38" fill="#ed7d31" rx="3"/>
-<rect x="669.8" y="113" width="11.1" height="38" fill="#c55a11" rx="3"/>
-<text x="691.0" y="137.0" fill="#a0a0a0" font-size="12" font-weight="500">434ms</text>
 <!-- rust: CAR 301.0ms + sig 0.2ms + MST walk 120.9ms = 422.1ms -->
-<text x="146" y="195.0" text-anchor="end" fill="#c0c0c0" font-size="13">rust (RustCrypto)</text>
-<rect x="160.0" y="171" width="360.5" height="38" fill="#e8944a" rx="3"/>
-<text x="340.3" y="194.0" text-anchor="middle" fill="white" font-size="10" font-weight="500">CAR parse</text>
-<rect x="520.5" y="171" width="1.0" height="38" fill="#ed7d31" rx="3"/>
-<rect x="521.5" y="171" width="144.8" height="38" fill="#c55a11" rx="3"/>
-<text x="593.9" y="194.0" text-anchor="middle" fill="white" font-size="10" font-weight="500">MST walk</text>
-<text x="676.3" y="195.0" fill="#a0a0a0" font-size="12" font-weight="500">422ms</text>
+<text x="146" y="137.0" text-anchor="end" fill="#c0c0c0" font-size="13">rust (RustCrypto)</text>
+<rect x="160.0" y="113" width="360.5" height="38" fill="#e8944a" rx="3"/>
+<text x="340.3" y="136.0" text-anchor="middle" fill="white" font-size="10" font-weight="500">CAR parse</text>
+<rect x="520.5" y="113" width="1.0" height="38" fill="#ed7d31" rx="3"/>
+<rect x="521.5" y="113" width="144.8" height="38" fill="#c55a11" rx="3"/>
+<text x="593.9" y="136.0" text-anchor="middle" fill="white" font-size="10" font-weight="500">MST walk</text>
+<text x="676.3" y="137.0" fill="#a0a0a0" font-size="12" font-weight="500">422ms</text>
+<!-- go: CAR 424.7ms + sig 0.2ms + MST walk 9.3ms = 434.2ms -->
+<text x="146" y="195.0" text-anchor="end" fill="#c0c0c0" font-size="13">go (indigo)</text>
+<rect x="160.0" y="171" width="508.8" height="38" fill="#e8944a" rx="3"/>
+<text x="414.4" y="194.0" text-anchor="middle" fill="white" font-size="10" font-weight="500">CAR parse</text>
+<rect x="668.8" y="171" width="1.0" height="38" fill="#ed7d31" rx="3"/>
+<rect x="669.8" y="171" width="11.1" height="38" fill="#c55a11" rx="3"/>
+<text x="691.0" y="195.0" fill="#a0a0a0" font-size="12" font-weight="500">434ms</text>
 <!-- axis labels -->
 <text x="160.0" y="227" text-anchor="middle" fill="#606060" font-size="10">0</text>
 <text x="264.0" y="227" text-anchor="middle" fill="#606060" font-size="10">87ms</text>
