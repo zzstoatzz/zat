@@ -463,14 +463,13 @@ pub const FirehoseClient = struct {
 
     fn connectAndRead(self: *FirehoseClient, host: []const u8, handler: anytype) !void {
         var path_buf: [256]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&path_buf);
-        const writer = stream.writer();
+        var w: std.Io.Writer = .fixed(&path_buf);
 
-        try writer.writeAll("/xrpc/com.atproto.sync.subscribeRepos");
+        try w.writeAll("/xrpc/com.atproto.sync.subscribeRepos");
         if (self.last_seq) |cursor| {
-            try writer.print("?cursor={d}", .{cursor});
+            try w.print("?cursor={d}", .{cursor});
         }
-        const path = stream.getWritten();
+        const path = w.buffered();
 
         log.info("connecting to wss://{s}{s}", .{ host, path });
 

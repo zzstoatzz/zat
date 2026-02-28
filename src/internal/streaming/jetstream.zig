@@ -214,33 +214,32 @@ pub const JetstreamClient = struct {
     }
 
     fn buildSubscribePath(self: *JetstreamClient, buf: *[2048]u8) ![]const u8 {
-        var stream = std.io.fixedBufferStream(buf);
-        const writer = stream.writer();
+        var w: std.Io.Writer = .fixed(buf);
 
-        try writer.writeAll("/subscribe");
+        try w.writeAll("/subscribe");
 
         var has_param = false;
 
         for (self.options.wanted_collections) |col| {
-            try writer.writeByte(if (!has_param) '?' else '&');
-            try writer.writeAll("wantedCollections=");
-            try writer.writeAll(col);
+            try w.writeByte(if (!has_param) '?' else '&');
+            try w.writeAll("wantedCollections=");
+            try w.writeAll(col);
             has_param = true;
         }
 
         for (self.options.wanted_dids) |did| {
-            try writer.writeByte(if (!has_param) '?' else '&');
-            try writer.writeAll("wantedDids=");
-            try writer.writeAll(did);
+            try w.writeByte(if (!has_param) '?' else '&');
+            try w.writeAll("wantedDids=");
+            try w.writeAll(did);
             has_param = true;
         }
 
         if (self.last_time_us) |cursor| {
-            try writer.writeByte(if (!has_param) '?' else '&');
-            try writer.print("cursor={d}", .{cursor});
+            try w.writeByte(if (!has_param) '?' else '&');
+            try w.print("cursor={d}", .{cursor});
         }
 
-        return stream.getWritten();
+        return w.buffered();
     }
 };
 

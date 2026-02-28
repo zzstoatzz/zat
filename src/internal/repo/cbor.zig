@@ -649,107 +649,107 @@ test "Value helper methods" {
 
 test "encode unsigned integers" {
     var buf: [16]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var w: std.Io.Writer = .fixed(&buf);
     const alloc = std.testing.allocator;
 
     // 0 → single byte
-    try encode(alloc, stream.writer(), .{ .unsigned = 0 });
-    try std.testing.expectEqualSlices(u8, &.{0x00}, stream.getWritten());
+    try encode(alloc, &w, .{ .unsigned = 0 });
+    try std.testing.expectEqualSlices(u8, &.{0x00}, w.buffered());
 
-    stream.reset();
-    try encode(alloc, stream.writer(), .{ .unsigned = 23 });
-    try std.testing.expectEqualSlices(u8, &.{0x17}, stream.getWritten());
+    w.end = 0;
+    try encode(alloc, &w, .{ .unsigned = 23 });
+    try std.testing.expectEqualSlices(u8, &.{0x17}, w.buffered());
 
     // 24 → 2 bytes (shortest encoding)
-    stream.reset();
-    try encode(alloc, stream.writer(), .{ .unsigned = 24 });
-    try std.testing.expectEqualSlices(u8, &.{ 0x18, 24 }, stream.getWritten());
+    w.end = 0;
+    try encode(alloc, &w, .{ .unsigned = 24 });
+    try std.testing.expectEqualSlices(u8, &.{ 0x18, 24 }, w.buffered());
 
     // 1000 → 3 bytes
-    stream.reset();
-    try encode(alloc, stream.writer(), .{ .unsigned = 1000 });
-    try std.testing.expectEqualSlices(u8, &.{ 0x19, 0x03, 0xe8 }, stream.getWritten());
+    w.end = 0;
+    try encode(alloc, &w, .{ .unsigned = 1000 });
+    try std.testing.expectEqualSlices(u8, &.{ 0x19, 0x03, 0xe8 }, w.buffered());
 }
 
 test "encode negative integers" {
     var buf: [16]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var w: std.Io.Writer = .fixed(&buf);
     const alloc = std.testing.allocator;
 
     // -1 → major 1, additional 0
-    try encode(alloc, stream.writer(), .{ .negative = -1 });
-    try std.testing.expectEqualSlices(u8, &.{0x20}, stream.getWritten());
+    try encode(alloc, &w, .{ .negative = -1 });
+    try std.testing.expectEqualSlices(u8, &.{0x20}, w.buffered());
 
-    stream.reset();
-    try encode(alloc, stream.writer(), .{ .negative = -10 });
-    try std.testing.expectEqualSlices(u8, &.{0x29}, stream.getWritten());
+    w.end = 0;
+    try encode(alloc, &w, .{ .negative = -10 });
+    try std.testing.expectEqualSlices(u8, &.{0x29}, w.buffered());
 }
 
 test "encode text strings" {
     var buf: [64]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var w: std.Io.Writer = .fixed(&buf);
     const alloc = std.testing.allocator;
 
-    try encode(alloc, stream.writer(), .{ .text = "" });
-    try std.testing.expectEqualSlices(u8, &.{0x60}, stream.getWritten());
+    try encode(alloc, &w, .{ .text = "" });
+    try std.testing.expectEqualSlices(u8, &.{0x60}, w.buffered());
 
-    stream.reset();
-    try encode(alloc, stream.writer(), .{ .text = "hello" });
-    try std.testing.expectEqualSlices(u8, &.{ 0x65, 'h', 'e', 'l', 'l', 'o' }, stream.getWritten());
+    w.end = 0;
+    try encode(alloc, &w, .{ .text = "hello" });
+    try std.testing.expectEqualSlices(u8, &.{ 0x65, 'h', 'e', 'l', 'l', 'o' }, w.buffered());
 }
 
 test "encode byte strings" {
     var buf: [64]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var w: std.Io.Writer = .fixed(&buf);
     const alloc = std.testing.allocator;
 
-    try encode(alloc, stream.writer(), .{ .bytes = &.{} });
-    try std.testing.expectEqualSlices(u8, &.{0x40}, stream.getWritten());
+    try encode(alloc, &w, .{ .bytes = &.{} });
+    try std.testing.expectEqualSlices(u8, &.{0x40}, w.buffered());
 
-    stream.reset();
-    try encode(alloc, stream.writer(), .{ .bytes = &.{ 1, 2, 3 } });
-    try std.testing.expectEqualSlices(u8, &.{ 0x43, 1, 2, 3 }, stream.getWritten());
+    w.end = 0;
+    try encode(alloc, &w, .{ .bytes = &.{ 1, 2, 3 } });
+    try std.testing.expectEqualSlices(u8, &.{ 0x43, 1, 2, 3 }, w.buffered());
 }
 
 test "encode booleans and null" {
     var buf: [4]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var w: std.Io.Writer = .fixed(&buf);
     const alloc = std.testing.allocator;
 
-    try encode(alloc, stream.writer(), .{ .boolean = false });
-    try std.testing.expectEqualSlices(u8, &.{0xf4}, stream.getWritten());
+    try encode(alloc, &w, .{ .boolean = false });
+    try std.testing.expectEqualSlices(u8, &.{0xf4}, w.buffered());
 
-    stream.reset();
-    try encode(alloc, stream.writer(), .{ .boolean = true });
-    try std.testing.expectEqualSlices(u8, &.{0xf5}, stream.getWritten());
+    w.end = 0;
+    try encode(alloc, &w, .{ .boolean = true });
+    try std.testing.expectEqualSlices(u8, &.{0xf5}, w.buffered());
 
-    stream.reset();
-    try encode(alloc, stream.writer(), .null);
-    try std.testing.expectEqualSlices(u8, &.{0xf6}, stream.getWritten());
+    w.end = 0;
+    try encode(alloc, &w, .null);
+    try std.testing.expectEqualSlices(u8, &.{0xf6}, w.buffered());
 }
 
 test "encode array" {
     var buf: [64]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var w: std.Io.Writer = .fixed(&buf);
     const alloc = std.testing.allocator;
 
     // [1, 2, 3]
-    try encode(alloc, stream.writer(), .{ .array = &.{
+    try encode(alloc, &w, .{ .array = &.{
         .{ .unsigned = 1 },
         .{ .unsigned = 2 },
         .{ .unsigned = 3 },
     } });
-    try std.testing.expectEqualSlices(u8, &.{ 0x83, 0x01, 0x02, 0x03 }, stream.getWritten());
+    try std.testing.expectEqualSlices(u8, &.{ 0x83, 0x01, 0x02, 0x03 }, w.buffered());
 }
 
 test "encode map with DAG-CBOR key sorting" {
     var buf: [128]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var w: std.Io.Writer = .fixed(&buf);
     const alloc = std.testing.allocator;
 
     // keys provided unsorted — encoder must sort by length, then lex
     // "bb" (len 2), "a" (len 1), "cc" (len 2) → sorted: "a", "bb", "cc"
-    try encode(alloc, stream.writer(), .{ .map = &.{
+    try encode(alloc, &w, .{ .map = &.{
         .{ .key = "bb", .value = .{ .unsigned = 2 } },
         .{ .key = "a", .value = .{ .unsigned = 1 } },
         .{ .key = "cc", .value = .{ .unsigned = 3 } },
@@ -761,7 +761,7 @@ test "encode map with DAG-CBOR key sorting" {
         0x62, 'b', 'b', 0x02, // "bb": 2 (same length, lex order)
         0x62, 'c', 'c', 0x03, // "cc": 3
     };
-    try std.testing.expectEqualSlices(u8, expected, stream.getWritten());
+    try std.testing.expectEqualSlices(u8, expected, w.buffered());
 }
 
 test "round-trip encode → decode" {
@@ -838,13 +838,13 @@ test "encode CID via tag 42" {
 
 test "writeUvarint round-trip" {
     var buf: [16]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var w: std.Io.Writer = .fixed(&buf);
 
     const test_values = [_]u64{ 0, 1, 127, 128, 255, 256, 16384, 0xffffffff };
     for (test_values) |val| {
-        stream.reset();
-        try writeUvarint(stream.writer(), val);
-        const written = stream.getWritten();
+        w.end = 0;
+        try writeUvarint(&w, val);
+        const written = w.buffered();
 
         var pos: usize = 0;
         const decoded = readUvarint(written, &pos).?;
@@ -856,17 +856,17 @@ test "writeUvarint round-trip" {
 test "DAG-CBOR key sort is stable" {
     // same-length keys must be lexicographically sorted
     var buf: [128]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var w: std.Io.Writer = .fixed(&buf);
     const alloc = std.testing.allocator;
 
-    try encode(alloc, stream.writer(), .{ .map = &.{
+    try encode(alloc, &w, .{ .map = &.{
         .{ .key = "op", .value = .{ .unsigned = 1 } },
         .{ .key = "ab", .value = .{ .unsigned = 2 } },
     } });
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
-    const decoded = try decodeAll(arena.allocator(), stream.getWritten());
+    const decoded = try decodeAll(arena.allocator(), w.buffered());
 
     // "ab" should come before "op" (lex order, same length)
     const entries = decoded.map;
