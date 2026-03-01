@@ -37,6 +37,15 @@ pub const car = @import("internal/repo/car.zig");
 pub const repo_verifier = @import("internal/repo/repo_verifier.zig");
 pub const verifyRepo = repo_verifier.verifyRepo;
 pub const VerifyResult = repo_verifier.VerifyResult;
+pub const verifyCommitCar = repo_verifier.verifyCommitCar;
+pub const CommitVerifyResult = repo_verifier.CommitVerifyResult;
+
+// sync 1.1: commit diff verification
+pub const MstOperation = mst.Operation;
+pub const Commit = repo_verifier.Commit;
+pub const loadCommitFromCAR = repo_verifier.loadCommitFromCAR;
+pub const verifyCommitDiff = repo_verifier.verifyCommitDiff;
+pub const CommitDiffResult = repo_verifier.CommitDiffResult;
 
 // sync / streaming
 const sync = @import("internal/streaming/sync.zig");

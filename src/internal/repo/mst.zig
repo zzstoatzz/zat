@@ -5,10 +5,15 @@
 //! SHA-256(key). keys are stored sorted within each node, with subtree
 //! pointers interleaved between entries.
 //!
+//! supports partial trees for sync 1.1: nodes not present in a CAR are
+//! represented as stubs (known CID, no block data). operations that need
+//! to descend into a stub return error.PartialTree.
+//!
 //! see: https://atproto.com/specs/repository#mst-structure
 
 const std = @import("std");
 const cbor = @import("cbor.zig");
+const car = @import("car.zig");
 const multibase = @import("../crypto/multibase.zig");
 const Allocator = std.mem.Allocator;
 
@@ -48,23 +53,60 @@ pub fn parseCidString(allocator: Allocator, s: []const u8) !cbor.Cid {
     return .{ .raw = raw };
 }
 
+/// reference to a child subtree — either a loaded node, a stub (CID only), or absent.
+pub const ChildRef = union(enum) {
+    none,
+    node: *Node,
+    stub: cbor.Cid, // known CID, block not in CAR
+
+    fn toNode(self: ChildRef) ?*Node {
+        return switch (self) {
+            .node => |n| n,
+            else => null,
+        };
+    }
+
+    fn isPresent(self: ChildRef) bool {
+        return self != .none;
+    }
+};
+
 /// MST node. stores a left subtree pointer and a list of entries.
 /// each entry has a key, CID value, and optional right subtree.
-const Node = struct {
-    left: ?*Node,
+pub const Node = struct {
+    left: ChildRef,
     entries: std.ArrayList(Entry),
 
-    const Entry = struct {
+    pub const Entry = struct {
         key: []const u8,
         value: cbor.Cid,
-        right: ?*Node,
+        right: ChildRef,
     };
 
     fn init() Node {
         return .{
-            .left = null,
+            .left = .none,
             .entries = .{},
         };
+    }
+};
+
+/// an operation on the MST (create, update, or delete a record)
+pub const Operation = struct {
+    path: []const u8, // "collection/rkey"
+    value: ?[]const u8, // raw CID bytes — non-null for create/update
+    prev: ?[]const u8, // raw CID bytes — non-null for update/delete
+
+    fn isCreate(self: Operation) bool {
+        return self.value != null and self.prev == null;
+    }
+
+    fn isDelete(self: Operation) bool {
+        return self.value == null and self.prev != null;
+    }
+
+    fn isUpdate(self: Operation) bool {
+        return self.value != null and self.prev != null;
     }
 };
 
@@ -84,6 +126,11 @@ pub const Mst = struct {
 
     /// insert or update a key-value pair
     pub fn put(self: *Mst, key: []const u8, value: cbor.Cid) !void {
+        _ = try self.putReturn(key, value);
+    }
+
+    /// insert or update a key-value pair, returning the previous value CID if it existed
+    pub fn putReturn(self: *Mst, key: []const u8, value: cbor.Cid) !?cbor.Cid {
         const height = keyHeight(key);
 
         if (self.root == null) {
@@ -92,25 +139,28 @@ pub const Mst = struct {
             try node.entries.append(self.allocator, .{
                 .key = try self.allocator.dupe(u8, key),
                 .value = value,
-                .right = null,
+                .right = .none,
             });
             self.root = node;
             self.root_layer = height;
-            return;
+            return null;
         }
 
         const root_layer = self.root_layer.?;
 
         if (height > root_layer) {
-            // key belongs above the current root — lift
+            // key belongs above the current root — lift (new key, never an update)
             self.root = try self.insertAbove(self.root.?, root_layer, key, value, height);
             self.root_layer = height;
+            return null;
         } else if (height == root_layer) {
             // key belongs at root layer
-            self.root = try self.insertAtLayer(self.root.?, key, value, height);
+            var prev: ?cbor.Cid = null;
+            self.root = try self.insertAtLayer(self.root.?, key, value, height, &prev);
+            return prev;
         } else {
             // key belongs below — recurse into subtree
-            try self.insertBelow(self.root.?, root_layer, key, value, height);
+            return try self.insertBelow(self.root.?, root_layer, key, value, height);
         }
     }
 
@@ -134,8 +184,8 @@ pub const Mst = struct {
         // height < layer: recurse into the subtree gap containing key
         for (node.entries.items, 0..) |entry, i| {
             if (std.mem.order(u8, key, entry.key) == .lt) {
-                const subtree = if (i == 0) node.left else node.entries.items[i - 1].right;
-                return findKey(subtree, layer - 1, key, height);
+                const child = if (i == 0) node.left else node.entries.items[i - 1].right;
+                return findKey(child.toNode(), layer - 1, key, height);
             }
         }
         // after all entries
@@ -143,41 +193,52 @@ pub const Mst = struct {
             node.entries.items[node.entries.items.len - 1].right
         else
             node.left;
-        return findKey(last_right, layer - 1, key, height);
+        return findKey(last_right.toNode(), layer - 1, key, height);
     }
 
     /// delete a key from the tree
     pub fn delete(self: *Mst, key: []const u8) !void {
-        if (self.root == null) return;
-        try self.deleteFromNode(self.root.?, self.root_layer.?, key);
+        _ = try self.deleteReturn(key);
+    }
+
+    /// delete a key from the tree, returning the removed value CID if it existed
+    pub fn deleteReturn(self: *Mst, key: []const u8) !?cbor.Cid {
+        if (self.root == null) return null;
+        const prev = try self.deleteFromNode(self.root.?, self.root_layer.?, key);
         // trim: if root has no entries and only left subtree, collapse
         while (self.root) |root| {
             if (root.entries.items.len == 0) {
-                if (root.left) |left| {
-                    self.root = left;
-                    if (self.root_layer.? > 0) {
-                        self.root_layer = self.root_layer.? - 1;
-                    } else {
+                switch (root.left) {
+                    .node => |left| {
+                        self.root = left;
+                        if (self.root_layer.? > 0) {
+                            self.root_layer = self.root_layer.? - 1;
+                        } else {
+                            self.root = null;
+                            self.root_layer = null;
+                            break;
+                        }
+                    },
+                    .stub => return error.PartialTree,
+                    .none => {
                         self.root = null;
                         self.root_layer = null;
                         break;
-                    }
-                } else {
-                    self.root = null;
-                    self.root_layer = null;
-                    break;
+                    },
                 }
             } else break;
         }
+        return prev;
     }
 
-    fn deleteFromNode(self: *Mst, node: *Node, layer: u32, key: []const u8) !void {
+    fn deleteFromNode(self: *Mst, node: *Node, layer: u32, key: []const u8) !?cbor.Cid {
         const height = keyHeight(key);
 
         if (height == layer) {
             // find and remove the entry
             for (node.entries.items, 0..) |entry, i| {
                 if (std.mem.eql(u8, entry.key, key)) {
+                    const prev_value = entry.value;
                     // merge left and right subtrees around the deleted entry
                     const left_sub = if (i == 0) node.left else node.entries.items[i - 1].right;
                     const right_sub = entry.right;
@@ -191,33 +252,37 @@ pub const Mst = struct {
 
                     self.allocator.free(entry.key);
                     _ = node.entries.orderedRemove(i);
-                    return;
+                    return prev_value;
                 }
             }
-            return; // key not found
+            return null; // key not found
         }
 
         // height < layer: recurse into the appropriate gap
         if (node.entries.items.len == 0) {
-            if (node.left) |left| {
-                try self.deleteFromNode(left, layer - 1, key);
+            switch (node.left) {
+                .node => |left| return try self.deleteFromNode(left, layer - 1, key),
+                .stub => return error.PartialTree,
+                .none => return null,
             }
-            return;
         }
 
         for (node.entries.items, 0..) |entry, i| {
             if (std.mem.order(u8, key, entry.key) == .lt) {
-                const subtree = if (i == 0) &node.left else &node.entries.items[i - 1].right;
-                if (subtree.*) |sub| {
-                    try self.deleteFromNode(sub, layer - 1, key);
+                const child_ref = if (i == 0) &node.left else &node.entries.items[i - 1].right;
+                switch (child_ref.*) {
+                    .node => |sub| return try self.deleteFromNode(sub, layer - 1, key),
+                    .stub => return error.PartialTree,
+                    .none => return null,
                 }
-                return;
             }
         }
         // after all entries
         const last = &node.entries.items[node.entries.items.len - 1].right;
-        if (last.*) |sub| {
-            try self.deleteFromNode(sub, layer - 1, key);
+        switch (last.*) {
+            .node => |sub| return try self.deleteFromNode(sub, layer - 1, key),
+            .stub => return error.PartialTree,
+            .none => return null,
         }
     }
 
@@ -225,12 +290,20 @@ pub const Mst = struct {
     /// both nodes are at the same layer. concatenate their entries
     /// and recursively merge if the junction creates adjacent children.
     /// follows the Go reference `appendMerge` / `mergeNodes` algorithm.
-    fn mergeSubtrees(self: *Mst, left: ?*Node, right: ?*Node) !?*Node {
-        if (left == null) return right;
-        if (right == null) return left;
+    fn mergeSubtrees(self: *Mst, left: ChildRef, right: ChildRef) !ChildRef {
+        if (left == .none) return right;
+        if (right == .none) return left;
 
-        const l = left.?;
-        const r = right.?;
+        const l = switch (left) {
+            .node => |n| n,
+            .stub => return error.PartialTree,
+            .none => unreachable,
+        };
+        const r = switch (right) {
+            .node => |n| n,
+            .stub => return error.PartialTree,
+            .none => unreachable,
+        };
 
         // create merged node: takes left's `left` pointer and all entries from both
         const merged = try self.createNode();
@@ -244,18 +317,18 @@ pub const Mst = struct {
         // check junction: last entry of left's `right` vs right's `left`
         if (merged.entries.items.len > 0) {
             const last = &merged.entries.items[merged.entries.items.len - 1];
-            if (last.right != null and r.left != null) {
+            if (last.right.isPresent() and r.left.isPresent()) {
                 // both sides of the junction are subtrees — recursively merge
                 last.right = try self.mergeSubtrees(last.right, r.left);
-            } else if (last.right == null and r.left != null) {
+            } else if (!last.right.isPresent() and r.left.isPresent()) {
                 last.right = r.left;
             }
-            // if last.right != null and r.left == null, keep last.right as-is
+            // if last.right is present and r.left is not, keep last.right as-is
         } else {
             // left has no entries: junction is merged.left vs r.left
-            if (merged.left != null and r.left != null) {
+            if (merged.left.isPresent() and r.left.isPresent()) {
                 merged.left = try self.mergeSubtrees(merged.left, r.left);
-            } else if (merged.left == null) {
+            } else if (!merged.left.isPresent()) {
                 merged.left = r.left;
             }
         }
@@ -265,36 +338,49 @@ pub const Mst = struct {
             try merged.entries.append(self.allocator, entry);
         }
 
-        return merged;
+        return .{ .node = merged };
     }
 
-    const MstError = Allocator.Error;
+    pub const MstError = error{PartialTree} || Allocator.Error;
 
     /// compute the root CID of the tree
     pub fn rootCid(self: *Mst) MstError!cbor.Cid {
-        return self.nodeCid(self.root);
+        if (self.root) |root| {
+            return self.nodeCid(.{ .node = root });
+        }
+        return self.nodeCid(.none);
     }
 
-    fn nodeCid(self: *Mst, maybe_node: ?*Node) MstError!cbor.Cid {
-        const encoded = try self.serializeNode(maybe_node);
-        defer self.allocator.free(encoded);
-        return cbor.Cid.forDagCbor(self.allocator, encoded);
+    fn nodeCid(self: *Mst, child: ChildRef) MstError!cbor.Cid {
+        switch (child) {
+            .stub => |cid| return cid,
+            .none => {
+                // empty node: { "l": null, "e": [] }
+                const encoded = try cbor.encodeAlloc(self.allocator, .{ .map = &.{
+                    .{ .key = "e", .value = .{ .array = &.{} } },
+                    .{ .key = "l", .value = .null },
+                } });
+                defer self.allocator.free(encoded);
+                return cbor.Cid.forDagCbor(self.allocator, encoded);
+            },
+            .node => |node| {
+                const encoded = try self.serializeNode(node);
+                defer self.allocator.free(encoded);
+                return cbor.Cid.forDagCbor(self.allocator, encoded);
+            },
+        }
     }
 
-    fn serializeNode(self: *Mst, maybe_node: ?*Node) MstError![]u8 {
-        const node = maybe_node orelse {
-            // empty node: { "l": null, "e": [] }
-            return cbor.encodeAlloc(self.allocator, .{ .map = &.{
-                .{ .key = "e", .value = .{ .array = &.{} } },
-                .{ .key = "l", .value = .null },
-            } });
-        };
-
+    fn serializeNode(self: *Mst, node: *Node) MstError![]u8 {
         // compute left subtree CID
-        const left_value: cbor.Value = if (node.left) |left| blk: {
-            const left_cid = try self.nodeCid(left);
-            break :blk .{ .cid = left_cid };
-        } else .null;
+        const left_value: cbor.Value = switch (node.left) {
+            .node => |left| blk: {
+                const left_cid = try self.nodeCid(.{ .node = left });
+                break :blk .{ .cid = left_cid };
+            },
+            .stub => |cid| .{ .cid = cid },
+            .none => .null,
+        };
 
         // build entry array with prefix compression
         var entry_values: std.ArrayList(cbor.Value) = .{};
@@ -306,10 +392,14 @@ pub const Mst = struct {
             const suffix = entry.key[prefix_len..];
 
             // right subtree CID
-            const tree_val: cbor.Value = if (entry.right) |right| blk: {
-                const right_cid = try self.nodeCid(right);
-                break :blk .{ .cid = right_cid };
-            } else .null;
+            const tree_val: cbor.Value = switch (entry.right) {
+                .node => |right| blk: {
+                    const right_cid = try self.nodeCid(.{ .node = right });
+                    break :blk .{ .cid = right_cid };
+                },
+                .stub => |cid| .{ .cid = cid },
+                .none => .null,
+            };
 
             // allocate map entries on heap (stack-local &.{...} would alias across iterations)
             const map_entries = try self.allocator.alloc(cbor.Value.MapEntry, 4);
@@ -332,6 +422,109 @@ pub const Mst = struct {
         } });
     }
 
+    /// deep copy the tree. shares key slices and CID raw slices (immutable).
+    /// stubs stay as stubs.
+    pub fn copy(self: *Mst) !Mst {
+        var new = Mst.init(self.allocator);
+        if (self.root) |root| {
+            new.root = try self.copyNode(root);
+        }
+        new.root_layer = self.root_layer;
+        return new;
+    }
+
+    fn copyNode(self: *Mst, node: *Node) !*Node {
+        const new_node = try self.createNode();
+        new_node.left = try self.copyChild(node.left);
+        for (node.entries.items) |entry| {
+            try new_node.entries.append(self.allocator, .{
+                .key = try self.allocator.dupe(u8, entry.key),
+                .value = entry.value,
+                .right = try self.copyChild(entry.right),
+            });
+        }
+        return new_node;
+    }
+
+    fn copyChild(self: *Mst, child: ChildRef) Allocator.Error!ChildRef {
+        return switch (child) {
+            .none => .none,
+            .stub => |cid| .{ .stub = cid },
+            .node => |n| .{ .node = try self.copyNode(n) },
+        };
+    }
+
+    /// load a partial MST from CAR blocks. nodes present in the CAR are
+    /// fully loaded; child CIDs not present become stubs.
+    pub fn loadFromBlocks(allocator: Allocator, repo_car: car.Car, root_cid_raw: []const u8) !Mst {
+        const root_data = car.findBlock(repo_car, root_cid_raw) orelse return error.CommitBlockNotFound;
+        const root_node_data = try decodeMstNode(allocator, root_data);
+
+        if (root_node_data.entries.len == 0 and root_node_data.left == null) {
+            return Mst.init(allocator);
+        }
+
+        const root_node = try loadNodeFromData(allocator, repo_car, root_node_data);
+
+        // root layer = key height of first entry
+        var key_buf: [512]u8 = undefined;
+        const first = root_node_data.entries[0];
+        @memcpy(key_buf[0..first.key_suffix.len], first.key_suffix);
+        const root_layer = keyHeight(key_buf[0..first.key_suffix.len]);
+
+        return .{
+            .allocator = allocator,
+            .root = root_node,
+            .root_layer = root_layer,
+        };
+    }
+
+    fn loadNodeFromData(allocator: Allocator, repo_car: car.Car, data: MstNodeData) !*Node {
+        const node = try allocator.create(Node);
+        node.* = Node.init();
+
+        // load left child
+        node.left = if (data.left) |left_cid_raw|
+            try loadChild(allocator, repo_car, left_cid_raw)
+        else
+            .none;
+
+        // load entries, reconstructing full keys from prefix compression
+        var prev_key: []const u8 = "";
+        for (data.entries) |entry_data| {
+            // reconstruct full key
+            const full_key = try allocator.alloc(u8, entry_data.prefix_len + entry_data.key_suffix.len);
+            if (entry_data.prefix_len > 0) {
+                @memcpy(full_key[0..entry_data.prefix_len], prev_key[0..entry_data.prefix_len]);
+            }
+            @memcpy(full_key[entry_data.prefix_len..], entry_data.key_suffix);
+
+            const right_child = if (entry_data.tree) |tree_cid_raw|
+                try loadChild(allocator, repo_car, tree_cid_raw)
+            else
+                ChildRef.none;
+
+            try node.entries.append(allocator, .{
+                .key = full_key,
+                .value = .{ .raw = entry_data.value },
+                .right = right_child,
+            });
+
+            prev_key = full_key;
+        }
+
+        return node;
+    }
+
+    fn loadChild(allocator: Allocator, repo_car: car.Car, cid_raw: []const u8) (MstDecodeError || error{CommitBlockNotFound})!ChildRef {
+        if (car.findBlock(repo_car, cid_raw)) |block_data| {
+            const child_data = try decodeMstNode(allocator, block_data);
+            return .{ .node = try loadNodeFromData(allocator, repo_car, child_data) };
+        }
+        // block not in CAR — stub
+        return .{ .stub = .{ .raw = cid_raw } };
+    }
+
     // === internal helpers ===
 
     fn createNode(self: *Mst) !*Node {
@@ -350,20 +543,18 @@ pub const Mst = struct {
         var right = splits.right;
 
         // 2. wrap each half in parent layers (bridge the gap)
-        // "extraLayersToAdd = keyZeros - layer"
-        // "intentionally starting at 1, since first layer is taken care of by split"
         const extra_layers = target_layer - node_layer;
         var i: u32 = 1;
         while (i < extra_layers) : (i += 1) {
-            if (left) |l| {
+            if (left.isPresent()) {
                 const parent = try self.createNode();
-                parent.left = l;
-                left = parent;
+                parent.left = left;
+                left = .{ .node = parent };
             }
-            if (right) |r| {
+            if (right.isPresent()) {
                 const parent = try self.createNode();
-                parent.left = r;
-                right = parent;
+                parent.left = right;
+                right = .{ .node = parent };
             }
         }
 
@@ -379,14 +570,15 @@ pub const Mst = struct {
     }
 
     /// insert a key at the same layer as the node
-    fn insertAtLayer(self: *Mst, node: *Node, key: []const u8, value: cbor.Cid, layer: u32) !*Node {
+    fn insertAtLayer(self: *Mst, node: *Node, key: []const u8, value: cbor.Cid, layer: u32, prev_out: *?cbor.Cid) !*Node {
         _ = layer;
         // find insertion position
         var insert_idx: usize = node.entries.items.len;
         for (node.entries.items, 0..) |entry, i| {
             const cmp = std.mem.order(u8, key, entry.key);
             if (cmp == .eq) {
-                // update existing
+                // update existing — return previous value
+                prev_out.* = node.entries.items[i].value;
                 node.entries.items[i].value = value;
                 return node;
             }
@@ -397,15 +589,19 @@ pub const Mst = struct {
         }
 
         // split the subtree that spans the insertion gap
-        const gap_subtree = if (insert_idx == 0) node.left else node.entries.items[insert_idx - 1].right;
+        const gap_child = if (insert_idx == 0) node.left else node.entries.items[insert_idx - 1].right;
 
-        var left_split: ?*Node = null;
-        var right_split: ?*Node = null;
+        var left_split: ChildRef = .none;
+        var right_split: ChildRef = .none;
 
-        if (gap_subtree) |subtree| {
-            const splits = try self.splitNode(subtree, key);
-            left_split = splits.left;
-            right_split = splits.right;
+        switch (gap_child) {
+            .node => |subtree| {
+                const splits = try self.splitNode(subtree, key);
+                left_split = splits.left;
+                right_split = splits.right;
+            },
+            .stub => return error.PartialTree,
+            .none => {},
         }
 
         // update the pointer before the gap
@@ -426,20 +622,20 @@ pub const Mst = struct {
     }
 
     /// insert a key below the current node's layer
-    fn insertBelow(self: *Mst, node: *Node, node_layer: u32, key: []const u8, value: cbor.Cid, target_height: u32) !void {
+    fn insertBelow(self: *Mst, node: *Node, node_layer: u32, key: []const u8, value: cbor.Cid, target_height: u32) !?cbor.Cid {
         // find which gap the key falls into
         for (node.entries.items, 0..) |entry, i| {
             const cmp = std.mem.order(u8, key, entry.key);
             if (cmp == .eq) {
                 // update existing
+                const prev = node.entries.items[i].value;
                 node.entries.items[i].value = value;
-                return;
+                return prev;
             }
             if (cmp == .lt) {
                 // key goes in the gap before this entry
                 const subtree_ptr = if (i == 0) &node.left else &node.entries.items[i - 1].right;
-                try self.insertIntoGap(subtree_ptr, node_layer - 1, key, value, target_height);
-                return;
+                return try self.insertIntoGap(subtree_ptr, node_layer - 1, key, value, target_height);
             }
         }
         // key goes after all entries
@@ -447,53 +643,66 @@ pub const Mst = struct {
             &node.entries.items[node.entries.items.len - 1].right
         else
             &node.left;
-        try self.insertIntoGap(last_ptr, node_layer - 1, key, value, target_height);
+        return try self.insertIntoGap(last_ptr, node_layer - 1, key, value, target_height);
     }
 
-    fn insertIntoGap(self: *Mst, subtree_ptr: *?*Node, gap_layer: u32, key: []const u8, value: cbor.Cid, target_height: u32) MstError!void {
+    fn insertIntoGap(self: *Mst, subtree_ptr: *ChildRef, gap_layer: u32, key: []const u8, value: cbor.Cid, target_height: u32) MstError!?cbor.Cid {
         if (target_height == gap_layer) {
             // insert at this layer
-            if (subtree_ptr.*) |existing| {
-                subtree_ptr.* = try self.insertAtLayer(existing, key, value, gap_layer);
-            } else {
-                const new_node = try self.createNode();
-                try new_node.entries.append(self.allocator, .{
-                    .key = try self.allocator.dupe(u8, key),
-                    .value = value,
-                    .right = null,
-                });
-                subtree_ptr.* = new_node;
+            switch (subtree_ptr.*) {
+                .node => |existing| {
+                    var prev: ?cbor.Cid = null;
+                    subtree_ptr.* = .{ .node = try self.insertAtLayer(existing, key, value, gap_layer, &prev) };
+                    return prev;
+                },
+                .stub => return error.PartialTree,
+                .none => {
+                    const new_node = try self.createNode();
+                    try new_node.entries.append(self.allocator, .{
+                        .key = try self.allocator.dupe(u8, key),
+                        .value = value,
+                        .right = .none,
+                    });
+                    subtree_ptr.* = .{ .node = new_node };
+                    return null;
+                },
             }
         } else if (target_height > gap_layer) {
             // need to lift — split and wrap
-            if (subtree_ptr.*) |existing| {
-                subtree_ptr.* = try self.insertAbove(existing, gap_layer, key, value, target_height);
-            } else {
-                const new_node = try self.createNode();
-                try new_node.entries.append(self.allocator, .{
-                    .key = try self.allocator.dupe(u8, key),
-                    .value = value,
-                    .right = null,
-                });
-                subtree_ptr.* = new_node;
+            switch (subtree_ptr.*) {
+                .node => |existing| {
+                    subtree_ptr.* = .{ .node = try self.insertAbove(existing, gap_layer, key, value, target_height) };
+                    return null;
+                },
+                .stub => return error.PartialTree,
+                .none => {
+                    const new_node = try self.createNode();
+                    try new_node.entries.append(self.allocator, .{
+                        .key = try self.allocator.dupe(u8, key),
+                        .value = value,
+                        .right = .none,
+                    });
+                    subtree_ptr.* = .{ .node = new_node };
+                    return null;
+                },
             }
         } else {
             // target_height < gap_layer: recurse deeper
-            if (subtree_ptr.*) |existing| {
-                try self.insertBelow(existing, gap_layer, key, value, target_height);
-            } else {
-                // create node at gap_layer and recurse
-                const new_node = try self.createNode();
-                subtree_ptr.* = new_node;
-                try self.insertBelow(new_node, gap_layer, key, value, target_height);
+            switch (subtree_ptr.*) {
+                .node => |existing| return try self.insertBelow(existing, gap_layer, key, value, target_height),
+                .stub => return error.PartialTree,
+                .none => {
+                    // create node at gap_layer and recurse
+                    const new_node = try self.createNode();
+                    subtree_ptr.* = .{ .node = new_node };
+                    return try self.insertBelow(new_node, gap_layer, key, value, target_height);
+                },
             }
         }
     }
 
     /// split a subtree around a key: everything < key goes left, everything >= key goes right.
-    /// follows the Go reference: find split point among leaf entries, then recursively
-    /// split the subtree in the gap if needed.
-    fn splitNode(self: *Mst, node: *Node, key: []const u8) !struct { left: ?*Node, right: ?*Node } {
+    fn splitNode(self: *Mst, node: *Node, key: []const u8) !struct { left: ChildRef, right: ChildRef } {
         // find the first entry >= key
         var split_idx: usize = node.entries.items.len;
         for (node.entries.items, 0..) |entry, i| {
@@ -520,31 +729,95 @@ pub const Mst = struct {
             try right_node.entries.append(self.allocator, entry);
         }
 
-        // the subtree between the last left entry and first right entry may need recursive splitting.
-        // in our representation: this is the right pointer of the last left entry (or left's left if no entries)
-        // for the right node, its "left" is initially null — we need to set it from the gap.
-
         // split the gap subtree between the two halves
         if (left_node.entries.items.len > 0) {
             const last_left = &left_node.entries.items[left_node.entries.items.len - 1];
-            if (last_left.right) |gap_subtree| {
-                const sub_split = try self.splitNode(gap_subtree, key);
-                last_left.right = sub_split.left;
-                right_node.left = sub_split.right;
+            switch (last_left.right) {
+                .node => |gap_subtree| {
+                    const sub_split = try self.splitNode(gap_subtree, key);
+                    last_left.right = sub_split.left;
+                    right_node.left = sub_split.right;
+                },
+                .stub => return error.PartialTree,
+                .none => {},
             }
-        } else if (left_node.left != null and split_idx == 0) {
+        } else if (left_node.left.isPresent() and split_idx == 0) {
             // all entries went right — the gap is the original node's left subtree
-            const sub_split = try self.splitNode(left_node.left.?, key);
-            left_node.left = sub_split.left;
-            right_node.left = sub_split.right;
+            switch (left_node.left) {
+                .node => |gap_subtree| {
+                    const sub_split = try self.splitNode(gap_subtree, key);
+                    left_node.left = sub_split.left;
+                    right_node.left = sub_split.right;
+                },
+                .stub => return error.PartialTree,
+                .none => {},
+            }
         }
 
-        const left_result: ?*Node = if (left_node.entries.items.len > 0 or left_node.left != null) left_node else null;
-        const right_result: ?*Node = if (right_node.entries.items.len > 0 or right_node.left != null) right_node else null;
+        const left_result: ChildRef = if (left_node.entries.items.len > 0 or left_node.left.isPresent())
+            .{ .node = left_node }
+        else
+            .none;
+        const right_result: ChildRef = if (right_node.entries.items.len > 0 or right_node.left.isPresent())
+            .{ .node = right_node }
+        else
+            .none;
 
         return .{ .left = left_result, .right = right_result };
     }
 };
+
+// === inversion primitives ===
+
+/// normalize operations: check for duplicate paths, sort deletions first then by path
+pub fn normalizeOps(allocator: Allocator, ops: []const Operation) ![]Operation {
+    if (ops.len == 0) return try allocator.alloc(Operation, 0);
+
+    const sorted = try allocator.dupe(Operation, ops);
+    errdefer allocator.free(sorted);
+
+    // sort: deletions first, then by path
+    std.mem.sort(Operation, sorted, {}, struct {
+        fn lessThan(_: void, a: Operation, b: Operation) bool {
+            // deletions before creates/updates
+            const a_del: u1 = if (a.isDelete()) 0 else 1;
+            const b_del: u1 = if (b.isDelete()) 0 else 1;
+            if (a_del != b_del) return a_del < b_del;
+            return std.mem.order(u8, a.path, b.path) == .lt;
+        }
+    }.lessThan);
+
+    // check for duplicate paths
+    var i: usize = 1;
+    while (i < sorted.len) : (i += 1) {
+        if (std.mem.eql(u8, sorted[i].path, sorted[i - 1].path)) {
+            allocator.free(sorted);
+            return error.DuplicatePath;
+        }
+    }
+
+    return sorted;
+}
+
+/// invert a single operation against the tree.
+/// create → delete, update → reverse update, delete → put back
+pub fn invertOp(tree: *Mst, op: Operation) !void {
+    if (op.isCreate()) {
+        // create → delete: remove the path, verify removed CID matches op.value
+        const removed = try tree.deleteReturn(op.path) orelse return error.InversionMismatch;
+        if (!std.mem.eql(u8, removed.raw, op.value.?)) return error.InversionMismatch;
+    } else if (op.isUpdate()) {
+        // update → reverse: put op.prev back, verify displaced CID matches op.value
+        const displaced = try tree.putReturn(op.path, .{ .raw = op.prev.? }) orelse return error.InversionMismatch;
+        if (!std.mem.eql(u8, displaced.raw, op.value.?)) return error.InversionMismatch;
+    } else if (op.isDelete()) {
+        // delete → put back: insert op.prev, verify path didn't already exist
+        const displaced = try tree.putReturn(op.path, .{ .raw = op.prev.? });
+        if (displaced != null) return error.InversionMismatch;
+    } else {
+        return error.InversionMismatch;
+    }
+}
 
 // === specialized MST node decoder ===
 //
@@ -774,6 +1047,65 @@ test "put and delete" {
     try std.testing.expect(tree.get("key2") != null);
 }
 
+test "putReturn and deleteReturn" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var tree = Mst.init(a);
+    const cid1 = try cbor.Cid.forDagCbor(a, "v1");
+    const cid2 = try cbor.Cid.forDagCbor(a, "v2");
+
+    // first insert returns null (no previous)
+    const prev1 = try tree.putReturn("key1", cid1);
+    try std.testing.expect(prev1 == null);
+
+    // update returns old value
+    const prev2 = try tree.putReturn("key1", cid2);
+    try std.testing.expect(prev2 != null);
+    try std.testing.expectEqualSlices(u8, cid1.raw, prev2.?.raw);
+
+    // delete returns removed value
+    const removed = try tree.deleteReturn("key1");
+    try std.testing.expect(removed != null);
+    try std.testing.expectEqualSlices(u8, cid2.raw, removed.?.raw);
+
+    // delete nonexistent returns null
+    const removed2 = try tree.deleteReturn("key1");
+    try std.testing.expect(removed2 == null);
+}
+
+test "copy produces independent tree" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var tree = Mst.init(a);
+    const cid1 = try cbor.Cid.forDagCbor(a, "v1");
+    const cid2 = try cbor.Cid.forDagCbor(a, "v2");
+
+    try tree.put("key1", cid1);
+    try tree.put("key2", cid1);
+
+    var tree2 = try tree.copy();
+
+    // modify copy
+    try tree2.put("key1", cid2);
+    try tree2.delete("key2");
+
+    // original unchanged
+    const got1 = tree.get("key1") orelse return error.NotFound;
+    try std.testing.expectEqualSlices(u8, cid1.raw, got1.raw);
+    try std.testing.expect(tree.get("key2") != null);
+
+    // copy has changes
+    const got1_copy = tree2.get("key1") orelse return error.NotFound;
+    try std.testing.expectEqualSlices(u8, cid2.raw, got1_copy.raw);
+    try std.testing.expect(tree2.get("key2") == null);
+}
+
 test "rootCid is deterministic" {
     const alloc = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(alloc);
@@ -928,6 +1260,136 @@ test "complex multi-op commit" {
 
     const expected_after = try parseCidString(a, "bafyreiftrcrbhrwmi37u4egedlg56gk3jeh3tvmqvwgowoifuklfysyx54");
     try std.testing.expectEqualSlices(u8, expected_after.raw, (try tree.rootCid()).raw);
+}
+
+test "inversion: create then invert" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const cid1 = try cbor.Cid.forDagCbor(a, "record1");
+
+    var tree = Mst.init(a);
+    const root_before = try tree.rootCid();
+
+    // apply forward: create
+    try tree.put("col/rkey1", cid1);
+
+    // invert: should remove it
+    try invertOp(&tree, .{
+        .path = "col/rkey1",
+        .value = cid1.raw,
+        .prev = null,
+    });
+
+    const root_after = try tree.rootCid();
+    try std.testing.expectEqualSlices(u8, root_before.raw, root_after.raw);
+}
+
+test "inversion: update then invert" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const cid1 = try cbor.Cid.forDagCbor(a, "v1");
+    const cid2 = try cbor.Cid.forDagCbor(a, "v2");
+
+    var tree = Mst.init(a);
+    try tree.put("col/rkey1", cid1);
+    const root_before = try tree.rootCid();
+
+    // apply forward: update cid1 → cid2
+    try tree.put("col/rkey1", cid2);
+
+    // invert
+    try invertOp(&tree, .{
+        .path = "col/rkey1",
+        .value = cid2.raw,
+        .prev = cid1.raw,
+    });
+
+    const root_after = try tree.rootCid();
+    try std.testing.expectEqualSlices(u8, root_before.raw, root_after.raw);
+}
+
+test "inversion: delete then invert" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const cid1 = try cbor.Cid.forDagCbor(a, "v1");
+
+    var tree = Mst.init(a);
+    try tree.put("col/rkey1", cid1);
+    const root_before = try tree.rootCid();
+
+    // apply forward: delete
+    try tree.delete("col/rkey1");
+
+    // invert
+    try invertOp(&tree, .{
+        .path = "col/rkey1",
+        .value = null,
+        .prev = cid1.raw,
+    });
+
+    const root_after = try tree.rootCid();
+    try std.testing.expectEqualSlices(u8, root_before.raw, root_after.raw);
+}
+
+test "inversion: multi-op commit round-trip" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const cid1 = try cbor.Cid.forDagCbor(a, "v1");
+    const cid2 = try cbor.Cid.forDagCbor(a, "v2");
+    const cid3 = try cbor.Cid.forDagCbor(a, "v3");
+
+    // build initial tree
+    var tree = Mst.init(a);
+    try tree.put("col/existing", cid1);
+    try tree.put("col/to_update", cid1);
+    try tree.put("col/to_delete", cid2);
+    const root_before = try tree.rootCid();
+
+    // apply forward ops
+    try tree.put("col/new_record", cid3); // create
+    try tree.put("col/to_update", cid2); // update
+    try tree.delete("col/to_delete"); // delete
+
+    // normalize and invert
+    const ops = [_]Operation{
+        .{ .path = "col/new_record", .value = cid3.raw, .prev = null }, // create
+        .{ .path = "col/to_update", .value = cid2.raw, .prev = cid1.raw }, // update
+        .{ .path = "col/to_delete", .value = null, .prev = cid2.raw }, // delete
+    };
+    const sorted = try normalizeOps(a, &ops);
+
+    for (sorted) |op| {
+        try invertOp(&tree, op);
+    }
+
+    const root_after = try tree.rootCid();
+    try std.testing.expectEqualSlices(u8, root_before.raw, root_after.raw);
+}
+
+test "normalizeOps rejects duplicates" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const ops = [_]Operation{
+        .{ .path = "col/same", .value = "cid1", .prev = null },
+        .{ .path = "col/same", .value = "cid2", .prev = null },
+    };
+
+    try std.testing.expectError(error.DuplicatePath, normalizeOps(a, &ops));
 }
 
 test "parseCidString" {
