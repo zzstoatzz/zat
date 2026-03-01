@@ -8,6 +8,7 @@ dependencies:
   nixpkgs:
     - bun
     - curl
+    - patchelf
 
 environment:
   WISP_DID: "did:plc:mkqt76xvfgxuemlwlx6ruc3w"
@@ -23,4 +24,10 @@ steps:
       test -n "$WISP_APP_PASSWORD"
       curl -sSL https://sites.wisp.place/nekomimi.pet/wisp-cli-binaries/wisp-cli-x86_64-linux -o wisp-cli
       chmod +x wisp-cli
+      # wisp-cli is dynamically linked against glibc — patch the interpreter
+      # to the nix store path since /lib64/ld-linux-x86-64.so.2 doesn't exist in nixery
+      INTERP=$(find /nix/store -name 'ld-linux-x86-64.so.2' -print -quit 2>/dev/null)
+      if [ -n "$INTERP" ]; then
+        patchelf --set-interpreter "$INTERP" --set-rpath "$(dirname "$INTERP")" wisp-cli
+      fi
       ./wisp-cli deploy "$WISP_DID" --path ./site-out --site "$WISP_SITE_NAME" --password "$WISP_APP_PASSWORD"
