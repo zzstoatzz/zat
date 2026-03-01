@@ -1,5 +1,9 @@
 # changelog
 
+## 0.2.7
+
+- **feat**: `Value.getUint()` — extract unsigned integers as `?u64` from CBOR maps. `getInt()` truncates values > `i64` max; upstream AT Protocol firehose seq numbers now exceed this limit.
+
 ## 0.2.6
 
 - **feat**: specialized MST decoder — `decodeMstNode()` parses known MST CBOR schema directly, zero-copy byte slicing, avoids generic `Value` union construction
