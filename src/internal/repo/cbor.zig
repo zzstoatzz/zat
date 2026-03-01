@@ -81,6 +81,16 @@ pub const Value = union(enum) {
         };
     }
 
+    /// get an unsigned integer from a map by key
+    pub fn getUint(self: Value, key: []const u8) ?u64 {
+        const v = self.get(key) orelse return null;
+        return switch (v) {
+            .unsigned => |u| u,
+            .negative => |n| std.math.cast(u64, n),
+            else => null,
+        };
+    }
+
     /// get a bool from a map by key
     pub fn getBool(self: Value, key: []const u8) ?bool {
         const v = self.get(key) orelse return null;
