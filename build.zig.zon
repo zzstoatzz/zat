@@ -1,12 +1,12 @@
 .{
     .name = .zat,
-    .version = "0.2.7",
+    .version = "0.2.8",
     .fingerprint = 0x8da9db57ee82fbe4,
     .minimum_zig_version = "0.15.0",
     .dependencies = .{
         .websocket = .{
-            .url = "https://github.com/karlseguin/websocket.zig/archive/97fefafa59cc78ce177cff540b8685cd7f699276.tar.gz",
-            .hash = "websocket-0.1.0-ZPISdRlzAwBB_Bz2UMMqxYqF6YEVTIBoFsbzwPUJTHIc",
+            .url = "https://github.com/zzstoatzz/websocket.zig/archive/50f179cfcb307e4872386658160a451fcdc7738d.tar.gz",
+            .hash = "websocket-0.1.0-ZPISddZzAwC_4VR6gW24TQVEVfplV0lEr16AyH0InGMX",
         },
         .@"atproto-interop-tests" = .{
             .url = "https://github.com/bluesky-social/atproto-interop-tests/archive/35bb5638ab1e5ce71fb88a0c95953fc557ef1925.tar.gz",
