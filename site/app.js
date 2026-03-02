@@ -109,6 +109,16 @@ function installContentLinkHandler() {
 }
 
 async function main() {
+  // SPA fallback: convert pathname to hash route so deep links work
+  // e.g. /roadmap -> #roadmap.md, /devlog/001 -> #devlog/001.md
+  if (location.pathname !== "/" && !location.hash) {
+    const path = location.pathname.replace(/^\/+/, "");
+    if (path) {
+      location.replace("#" + normalizeDocPath(path));
+      return;
+    }
+  }
+
   if (!globalThis.marked) {
     contentEl.innerHTML = `<p class="empty">Markdown renderer failed to load.</p>`;
     return;
