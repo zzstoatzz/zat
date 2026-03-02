@@ -168,6 +168,14 @@ async function main() {
     await mkdir(path.dirname(dst), { recursive: true });
     await cp(src, dst);
 
+    // create short-name alias (e.g. 001.md for 001-self-publishing-docs.md)
+    // so ATProto published paths like /devlog/001 resolve correctly
+    const base = path.basename(rel, ".md");
+    const shortName = base.replace(/-.*$/, "");
+    if (shortName !== base) {
+      await cp(src, path.join(outDocsDir, "devlog", shortName + ".md"));
+    }
+
     const md = await readFile(src, "utf8");
     devlogEntries.push({
       path: `devlog/${rel}`,
