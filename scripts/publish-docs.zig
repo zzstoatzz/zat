@@ -17,6 +17,9 @@ const devlog = [_]DocEntry{
     .{ .path = "/devlog/001", .file = "devlog/001-self-publishing-docs.md" },
     .{ .path = "/devlog/002", .file = "devlog/002-firehose-and-benchmarks.md" },
     .{ .path = "/devlog/003", .file = "devlog/003-trust-chain.md" },
+    .{ .path = "/devlog/004", .file = "devlog/004-sig-verify.md" },
+    .{ .path = "/devlog/005", .file = "devlog/005-three-way-verify.md" },
+    .{ .path = "/devlog/006", .file = "devlog/006-building-a-relay.md" },
 };
 
 pub fn main() !void {

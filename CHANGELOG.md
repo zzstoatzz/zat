@@ -1,5 +1,17 @@
 # changelog
 
+## 0.2.9
+
+- **fix**: SPA fallback routing for standard.site deep links — `_redirects`, `<base href="/">`, devlog short-name aliases
+- **fix**: add glibc to nixery deps for wisp-cli patchelf in CI
+- **docs**: devlog 006 — building a relay in zig (zlay architecture, deployment war stories, backfill)
+- **fix**: publish-docs.zig missing devlog entries 004-006
+
+## 0.2.8
+
+- **feat**: sync 1.1 — `ChildRef` union, `loadFromBlocks`, `putReturn`/`deleteReturn`, `verifyCommitDiff`
+- **feat**: `loadCommitFromCAR` returns unsigned commit bytes
+
 ## 0.2.7
 
 - **feat**: `Value.getUint()` — extract unsigned integers as `?u64` from CBOR maps. `getInt()` truncates values > `i64` max; upstream AT Protocol firehose seq numbers now exceed this limit.
