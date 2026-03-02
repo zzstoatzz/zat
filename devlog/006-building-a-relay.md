@@ -42,7 +42,7 @@ the key modules:
 
 **OS threads, not goroutines.** one thread per PDS host. predictable memory, no GC pauses, but thread count scales linearly. 2,750 threads is fine — most are blocked on WebSocket reads. per-thread RSS is modest (stack pages on demand, ~1-2 MiB when active).
 
-**split ports.** 3000 for the WebSocket firehose, 3001 for HTTP (health, stats, metrics, admin, XRPC). indigo serves everything on 2470.
+**single port.** everything — WebSocket firehose, HTTP API, admin endpoints — on port 3000. a second port (3001) serves only prometheus metrics. indigo does the same: 2470 for everything, 2471 for metrics. this required patching the websocket.zig fork to support HTTP fallback — when a non-WebSocket request arrives, the handshake parser routes it to an HTTP handler instead of returning an error.
 
 ## deployment war stories
 
@@ -90,9 +90,9 @@ the backfiller discovers collections from two sources: [lexicon garden](https://
 
 progress is tracked in postgres — cursor position and imported count per collection — so crashes resume where they left off. triggered via admin API, monitored via status endpoint.
 
-first backfill run: 1,269 collections discovered. the small ones (niche lexicons, alt clients) complete in seconds. the big ones — `app.bsky.feed.like`, `app.bsky.feed.post`, `app.bsky.actor.profile` — each have 20-30M+ DIDs and take hours to page through at 1,000 per request with a 100ms pause between pages.
+first backfill run: 1,287 collections discovered. the small ones (niche lexicons, alt clients) complete in seconds. the big ones — `app.bsky.feed.like`, `app.bsky.feed.post`, `app.bsky.actor.profile` — each have 20-30M+ DIDs and take hours to page through at 1,000 per request with a 100ms pause between pages.
 
-as of writing: 621 collections complete, 13.6M DIDs imported, currently grinding through `feed.like` at ~250K DIDs/minute.
+as of writing: backfill complete — 1,287 collections indexed, 61M DIDs imported.
 
 ## the build pipeline
 
@@ -104,14 +104,17 @@ the runtime Dockerfile is five lines: debian base, ca-certificates, copy the bin
 
 | | indigo (Go) | zlay (zig) |
 |---|---|---|
-| code | ~50k+ lines | ~6k lines |
 | dependencies | ~50 Go modules | 4 (zat, websocket, pg, rocksdb) |
-| memory | ~6 GiB (GOMEMLIMIT) | ~1.8 GiB (1,486 hosts) |
+| memory | ~6 GiB (GOMEMLIMIT) | ~2.9 GiB (~2,750 hosts) |
 | collection index | sidecar process (pebble) | inline (RocksDB) |
 | validation | blocking (DID resolution) | optimistic (pass-through on miss) |
 | services to deploy | 2 (relay + collectiondir) | 1 |
 
-the memory difference isn't zig being "faster" — it's the absence of a garbage collector holding onto freed memory. Go's relay sets `GOMEMLIMIT=6GiB` to tell the runtime it's OK to return memory to the OS. zlay's threads use what they need and the OS pages the rest.
+the first measurement (1.8 GiB at 1,486 hosts) was misleading — memory climbed to 6.6 GiB as the relay connected to all ~2,750 hosts, approaching the 8 GiB OOM limit. two fixes brought it back down:
+
+1. **thread stack sizes.** zig's default is 16 MB per thread. with ~2,750 subscriber threads that maps 44 GB of virtual memory. most threads just read WebSockets and decode CBOR — 2 MB is generous. all `Thread.spawn` calls now pass `.{ .stack_size = 2 * 1024 * 1024 }`.
+
+2. **c_allocator instead of GeneralPurposeAllocator.** GPA is actually a debug allocator (renamed `DebugAllocator` in zig 0.15) — it tracks per-allocation metadata and never returns freed small allocations to the OS. since zlay links glibc, `std.heap.c_allocator` gives glibc malloc with per-thread arenas, `madvise`-based page return, and production-grade fragmentation mitigation.
 
 ## what zat exercises
 
@@ -119,8 +122,18 @@ zlay is the heaviest consumer of zat. every firehose frame exercises the CBOR co
 
 running at ~600 events/sec sustained, zat processes roughly 50M CBOR decodes per day. that's a different kind of test than unit vectors.
 
+## spec compliance
+
+after the memory fixes, the next pass was checking zlay against the actual lexicon definitions for what a relay should implement. three gaps:
+
+1. **`getHostStatus` was missing.** the lexicon says "implemented by relays" — zlay had `listHosts` but not the single-host query. straightforward handler: look up host, count accounts, map internal status values to the lexicon's `hostStatus` enum.
+
+2. **admin takedowns didn't emit `#account` events.** `/admin/repo/ban` zeroed payloads on disk but never told downstream consumers the account was taken down. the spec says a relay's own takedown should produce an `#account` event. fix: build a CBOR frame (`active: false, status: "takendown"`), persist it, broadcast it.
+
+3. **DID migration was unvalidated.** when an account appeared from a different PDS host, zlay blindly updated the host_id. now it queues a migration check — the validator's background threads resolve the DID document, check `pdsEndpoint()`, and only update if the new host matches.
+
 ## what's next
 
-the backfill will finish in a few hours. after that, zlay's collection index should be at parity with bsky.network's collectiondir for the first time. the next step is a correctness audit — diff `listReposByCollection` results between zlay and bsky.network across a sample of collections and verify the sets match.
+the backfill is complete — 1,287 collections indexed, 61M DIDs. the next step is a correctness audit — diff `listReposByCollection` results across a sample of collections against bsky.network's collectiondir and verify the sets match.
 
-longer term: sync 1.1 support is partially implemented (zlay already handles `#sync` frames from the firehose), but full commit diff verification via MST inversion is the remaining piece. that's where zat's `verifyCommitDiff` comes in — the primitives exist, they just need to be wired into the relay's validation pipeline.
+longer term: full commit diff verification via MST inversion. zlay already handles `#sync` frames and validates signatures, but the inductive firehose check (`verifyCommitDiff`) isn't wired into the hot path yet. the primitives exist in zat — it's a throughput tradeoff.
