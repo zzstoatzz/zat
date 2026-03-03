@@ -1,5 +1,9 @@
 # changelog
 
+## 0.2.10
+
+- **deps**: bump websocket.zig to fork commit `9e6d732` — TCP split guard for HTTP body reads behind reverse proxies
+
 ## 0.2.9
 
 - **fix**: SPA fallback routing for standard.site deep links — `_redirects`, `<base href="/">`, devlog short-name aliases
