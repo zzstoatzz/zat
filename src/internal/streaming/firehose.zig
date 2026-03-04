@@ -485,6 +485,7 @@ pub const FirehoseClient = struct {
         const host_header = std.fmt.bufPrint(&host_header_buf, "Host: {s}\r\n", .{host}) catch host;
 
         try client.handshake(path, .{ .headers = host_header });
+        configureKeepalive(&client);
 
         log.info("firehose connected to {s}", .{host});
 
@@ -525,6 +526,23 @@ fn WsHandler(comptime H: type) type {
             log.info("firehose connection closed", .{});
         }
     };
+}
+
+/// enable TCP keepalive so reads don't block forever when a peer
+/// disappears without FIN/RST (network partition, crash, power loss).
+/// detection time: 10s idle + 5s × 2 probes = 20s.
+fn configureKeepalive(client: *websocket.Client) void {
+    const fd = client.stream.stream.handle;
+    const builtin = @import("builtin");
+    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.KEEPALIVE, &std.mem.toBytes(@as(i32, 1))) catch return;
+    const tcp: i32 = @intCast(posix.IPPROTO.TCP);
+    if (builtin.os.tag == .linux) {
+        posix.setsockopt(fd, tcp, posix.TCP.KEEPIDLE, &std.mem.toBytes(@as(i32, 10))) catch return;
+    } else if (builtin.os.tag == .macos) {
+        posix.setsockopt(fd, tcp, posix.TCP.KEEPALIVE, &std.mem.toBytes(@as(i32, 10))) catch return;
+    }
+    posix.setsockopt(fd, tcp, posix.TCP.KEEPINTVL, &std.mem.toBytes(@as(i32, 5))) catch return;
+    posix.setsockopt(fd, tcp, posix.TCP.KEEPCNT, &std.mem.toBytes(@as(i32, 2))) catch return;
 }
 
 // === tests ===
