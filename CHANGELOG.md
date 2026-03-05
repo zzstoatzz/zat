@@ -1,5 +1,9 @@
 # changelog
 
+## 0.2.12
+
+- **feat**: configurable `keep_alive` on `HttpTransport` and `DidResolver.initWithOptions` — allows disabling HTTP connection reuse for memory leak investigation
+
 ## 0.2.11
 
 - **fix**: enable TCP keepalive on websocket connections — detect dead peers in ~20s instead of blocking forever
