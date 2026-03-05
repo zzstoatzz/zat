@@ -17,9 +17,19 @@ pub const DidResolver = struct {
     plc_url: []const u8 = "https://plc.directory",
 
     pub fn init(allocator: std.mem.Allocator) DidResolver {
+        return initWithOptions(allocator, .{});
+    }
+
+    pub const Options = struct {
+        keep_alive: bool = true,
+    };
+
+    pub fn initWithOptions(allocator: std.mem.Allocator, options: Options) DidResolver {
+        var transport = HttpTransport.init(allocator);
+        transport.keep_alive = options.keep_alive;
         return .{
             .allocator = allocator,
-            .transport = HttpTransport.init(allocator),
+            .transport = transport,
         };
     }
 

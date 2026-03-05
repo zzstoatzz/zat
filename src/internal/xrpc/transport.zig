@@ -13,6 +13,7 @@ const std = @import("std");
 pub const HttpTransport = struct {
     allocator: std.mem.Allocator,
     http_client: std.http.Client,
+    keep_alive: bool = true,
 
     // 0.16: will add
     // io: ?std.Io = null,
@@ -80,6 +81,7 @@ pub const HttpTransport = struct {
             .payload = options.payload,
             .headers = headers,
             .extra_headers = extra_buf[0..extra_count],
+            .keep_alive = self.keep_alive,
         }) catch return error.RequestFailed;
 
         const body = aw.toArrayList().items;
