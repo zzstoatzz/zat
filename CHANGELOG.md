@@ -1,5 +1,9 @@
 # changelog
 
+## 0.2.13
+
+- **docs**: devlog 007 — up and to the right (corrections to 006, sync 1.1 verification, lightrail collection index)
+
 ## 0.2.12
 
 - **feat**: configurable `keep_alive` on `HttpTransport` and `DidResolver.initWithOptions` — allows disabling HTTP connection reuse for memory leak investigation

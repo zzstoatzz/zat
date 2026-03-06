@@ -20,6 +20,7 @@ const devlog = [_]DocEntry{
     .{ .path = "/devlog/004", .file = "devlog/004-sig-verify.md" },
     .{ .path = "/devlog/005", .file = "devlog/005-three-way-verify.md" },
     .{ .path = "/devlog/006", .file = "devlog/006-building-a-relay.md" },
+    .{ .path = "/devlog/007", .file = "devlog/007-up-and-to-the-right.md" },
 };
 
 pub fn main() !void {
