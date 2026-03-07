@@ -84,11 +84,9 @@ pub const HttpTransport = struct {
             .keep_alive = self.keep_alive,
         }) catch return error.RequestFailed;
 
-        const body = aw.toArrayList().items;
-
         return .{
             .status = result.status,
-            .body = try self.allocator.dupe(u8, body),
+            .body = try self.allocator.dupe(u8, aw.written()),
         };
     }
 

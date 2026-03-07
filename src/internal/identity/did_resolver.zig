@@ -128,6 +128,22 @@ test "resolve did:plc - integration" {
     try std.testing.expect(doc.handle() != null);
 }
 
+test "resolve did:plc - leak check (no arena)" {
+    // repro for memory leak report: use testing.allocator directly
+    // (no arena) to see if std.http.Client leaks on deinit
+    var resolver = DidResolver.init(std.testing.allocator);
+    defer resolver.deinit();
+
+    const did = Did.parse("did:plc:z72i7hdynmk6r22z27h6tvur").?;
+    var doc = resolver.resolve(did) catch |err| {
+        std.debug.print("network error (expected in CI): {}\n", .{err});
+        return;
+    };
+    defer doc.deinit();
+
+    try std.testing.expectEqualStrings("did:plc:z72i7hdynmk6r22z27h6tvur", doc.id);
+}
+
 test "did:web url construction" {
     // test url building without network
     var resolver = DidResolver.init(std.testing.allocator);
