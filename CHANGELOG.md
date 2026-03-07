@@ -1,5 +1,9 @@
 # changelog
 
+## 0.2.14
+
+- **fix**: memory leak in `HttpTransport.fetch()` — `toArrayList()` transferred buffer ownership without freeing; use `written()` instead to keep ownership with the deferred `deinit()`
+
 ## 0.2.13
 
 - **docs**: devlog 007 — up and to the right (corrections to 006, sync 1.1 verification, lightrail collection index)
