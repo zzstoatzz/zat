@@ -27,6 +27,7 @@ pub const jwt = @import("internal/crypto/jwt.zig");
 pub const Jwt = jwt.Jwt;
 pub const multibase = @import("internal/crypto/multibase.zig");
 pub const multicodec = @import("internal/crypto/multicodec.zig");
+pub const Keypair = @import("internal/crypto/keypair.zig").Keypair;
 
 // repo
 pub const mst = @import("internal/repo/mst.zig");

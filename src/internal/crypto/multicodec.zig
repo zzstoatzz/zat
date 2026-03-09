@@ -81,11 +81,43 @@ pub fn formatDidKey(allocator: std.mem.Allocator, key_type: KeyType, raw: []cons
     defer allocator.free(multibase_str);
 
     // "did:key:" + multibase string (which already has 'z' prefix)
-    const prefix = "did:key:";
-    const result = try allocator.alloc(u8, prefix.len + multibase_str.len);
-    @memcpy(result[0..prefix.len], prefix);
-    @memcpy(result[prefix.len..], multibase_str);
+    const result = try allocator.alloc(u8, did_key_prefix.len + multibase_str.len);
+    @memcpy(result[0..did_key_prefix.len], did_key_prefix);
+    @memcpy(result[did_key_prefix.len..], multibase_str);
     return result;
+}
+
+const did_key_prefix = "did:key:";
+
+/// parse a did:key string into key type and raw public key bytes.
+/// caller owns the returned slice (raw field).
+pub fn parseDidKey(allocator: std.mem.Allocator, did: []const u8) !struct { key_type: KeyType, raw: []u8 } {
+    const multibase = @import("multibase.zig");
+
+    if (!std.mem.startsWith(u8, did, did_key_prefix)) return error.InvalidDidKey;
+    const multibase_str = did[did_key_prefix.len..];
+    if (multibase_str.len == 0) return error.InvalidDidKey;
+
+    const mc_bytes = try multibase.decode(allocator, multibase_str);
+    defer allocator.free(mc_bytes);
+
+    const parsed = try parsePublicKey(mc_bytes);
+    const raw = try allocator.dupe(u8, parsed.raw);
+    return .{ .key_type = parsed.key_type, .raw = raw };
+}
+
+/// verify an ECDSA signature given a did:key string.
+/// dispatches to the correct curve based on the key type encoded in the did:key.
+pub fn verifyDidKeySignature(allocator: std.mem.Allocator, did: []const u8, message: []const u8, sig_bytes: []const u8) !void {
+    const jwt = @import("jwt.zig");
+
+    const parsed = try parseDidKey(allocator, did);
+    defer allocator.free(parsed.raw);
+
+    switch (parsed.key_type) {
+        .secp256k1 => try jwt.verifySecp256k1(message, sig_bytes, parsed.raw),
+        .p256 => try jwt.verifyP256(message, sig_bytes, parsed.raw),
+    }
 }
 
 // === tests ===
@@ -182,4 +214,90 @@ test "did:key round-trip p256" {
     const parsed = try parsePublicKey(mc_bytes);
     try std.testing.expectEqual(KeyType.p256, parsed.key_type);
     try std.testing.expectEqualSlices(u8, &raw, parsed.raw);
+}
+
+test "parseDidKey round-trip secp256k1" {
+    const alloc = std.testing.allocator;
+
+    var raw: [33]u8 = undefined;
+    raw[0] = 0x02;
+    @memset(raw[1..], 0xcc);
+
+    const did_str = try formatDidKey(alloc, .secp256k1, &raw);
+    defer alloc.free(did_str);
+
+    const parsed = try parseDidKey(alloc, did_str);
+    defer alloc.free(parsed.raw);
+
+    try std.testing.expectEqual(KeyType.secp256k1, parsed.key_type);
+    try std.testing.expectEqualSlices(u8, &raw, parsed.raw);
+}
+
+test "parseDidKey round-trip p256" {
+    const alloc = std.testing.allocator;
+
+    var raw: [33]u8 = undefined;
+    raw[0] = 0x03;
+    @memset(raw[1..], 0xdd);
+
+    const did_str = try formatDidKey(alloc, .p256, &raw);
+    defer alloc.free(did_str);
+
+    const parsed = try parseDidKey(alloc, did_str);
+    defer alloc.free(parsed.raw);
+
+    try std.testing.expectEqual(KeyType.p256, parsed.key_type);
+    try std.testing.expectEqualSlices(u8, &raw, parsed.raw);
+}
+
+test "parseDidKey with real indigo test vector" {
+    // from bluesky-social/indigo jwt test fixtures
+    const alloc = std.testing.allocator;
+
+    const parsed = try parseDidKey(alloc, "did:key:zQ3shscXNYZQZSPwegiv7uQZZV5kzATLBRtgJhs7uRY7pfSk4");
+    defer alloc.free(parsed.raw);
+
+    try std.testing.expectEqual(KeyType.secp256k1, parsed.key_type);
+    try std.testing.expectEqual(@as(usize, 33), parsed.raw.len);
+    try std.testing.expect(parsed.raw[0] == 0x02 or parsed.raw[0] == 0x03);
+}
+
+test "parseDidKey rejects invalid prefix" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.InvalidDidKey, parseDidKey(alloc, "did:web:example.com"));
+    try std.testing.expectError(error.InvalidDidKey, parseDidKey(alloc, "did:key:"));
+    try std.testing.expectError(error.InvalidDidKey, parseDidKey(alloc, ""));
+}
+
+test "verifyDidKeySignature secp256k1" {
+    const alloc = std.testing.allocator;
+    const jwt = @import("jwt.zig");
+    const crypto = std.crypto;
+    const Scheme = crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
+
+    const sk_bytes = [_]u8{
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+        0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+    };
+
+    const message = "verify via did:key";
+    const sig = try jwt.signSecp256k1(message, &sk_bytes);
+
+    // derive public key and format as did:key
+    const sk = try Scheme.SecretKey.fromBytes(sk_bytes);
+    const kp = try Scheme.KeyPair.fromSecretKey(sk);
+    const pk_bytes = kp.public_key.toCompressedSec1();
+    const did = try formatDidKey(alloc, .secp256k1, &pk_bytes);
+    defer alloc.free(did);
+
+    // should verify
+    try verifyDidKeySignature(alloc, did, message, &sig.bytes);
+
+    // should reject wrong message
+    try std.testing.expectError(
+        error.SignatureVerificationFailed,
+        verifyDidKeySignature(alloc, did, "wrong message", &sig.bytes),
+    );
 }
