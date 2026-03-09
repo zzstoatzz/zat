@@ -1,5 +1,11 @@
 # changelog
 
+## 0.2.15
+
+- **feat**: `parseDidKey`, `verifyDidKeySignature` — parse `did:key` strings back to key type + raw bytes, verify signatures by `did:key` with automatic curve dispatch
+- **feat**: `Keypair` struct — unified abstraction over secp256k1/P-256 for sign, publicKey, did:key formatting
+- **feat**: optional `onConnect` callback on `JetstreamClient` — exposes which host the client connected to
+
 ## 0.2.14
 
 - **fix**: memory leak in `HttpTransport.fetch()` — `toArrayList()` transferred buffer ownership without freeing; use `written()` instead to keep ownership with the deferred `deinit()`
