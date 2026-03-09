@@ -147,6 +147,7 @@ pub const JetstreamClient = struct {
     /// subscribe with a user-provided handler.
     /// handler must implement: fn onEvent(*@TypeOf(handler), Event) void
     /// optional: fn onError(*@TypeOf(handler), anyerror) void
+    /// optional: fn onConnect(*@TypeOf(handler), []const u8) void — called with host on connect
     /// blocks forever — reconnects with exponential backoff on disconnect.
     /// rotates through hosts on each reconnect attempt.
     pub fn subscribe(self: *JetstreamClient, handler: anytype) void {
@@ -205,6 +206,10 @@ pub const JetstreamClient = struct {
         configureKeepalive(&client);
 
         log.info("jetstream connected to {s}", .{host});
+
+        if (comptime @hasDecl(@TypeOf(handler.*), "onConnect")) {
+            handler.onConnect(host);
+        }
 
         var ws_handler = WsHandler(@TypeOf(handler.*)){
             .allocator = self.allocator,
