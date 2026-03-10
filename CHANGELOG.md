@@ -1,5 +1,9 @@
 # changelog
 
+## 0.2.16
+
+- **fix**: bump websocket.zig to `395d0f4` — reads full HTTP body on TCP split writes (fixes empty body when headers and body arrive in separate TCP segments)
+
 ## 0.2.15
 
 - **feat**: `parseDidKey`, `verifyDidKeySignature` — parse `did:key` strings back to key type + raw bytes, verify signatures by `did:key` with automatic curve dispatch
