@@ -14,6 +14,7 @@ const AtUri = @import("../syntax/at_uri.zig").AtUri;
 
 // crypto
 const jwt = @import("../crypto/jwt.zig");
+const Keypair = @import("../crypto/keypair.zig").Keypair;
 const multibase = @import("../crypto/multibase.zig");
 const multicodec = @import("../crypto/multicodec.zig");
 
@@ -231,6 +232,192 @@ test "interop: crypto signature verification" {
 
     // should have tested all 6 fixtures
     try std.testing.expect(tested == fixtures.len);
+}
+
+// === tier 2b: did:key derivation ===
+
+test "interop: did:key derivation K256" {
+    const allocator = std.testing.allocator;
+
+    const fixture_json = @embedFile("w3c_didkey_K256");
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, fixture_json, .{});
+    defer parsed.deinit();
+
+    const fixtures = parsed.value.array.items;
+    var tested: usize = 0;
+
+    for (fixtures) |fixture| {
+        const obj = fixture.object;
+        const hex_str = obj.get("privateKeyBytesHex").?.string;
+        const expected_did = obj.get("publicDidKey").?.string;
+
+        var sk_bytes: [32]u8 = undefined;
+        _ = std.fmt.hexToBytes(&sk_bytes, hex_str) catch return error.InvalidHex;
+
+        const kp = try Keypair.fromSecretKey(.secp256k1, sk_bytes);
+        const actual_did = try kp.did(allocator);
+        defer allocator.free(actual_did);
+
+        if (!std.mem.eql(u8, actual_did, expected_did)) {
+            std.debug.print("FAIL K256: expected {s}, got {s}\n", .{ expected_did, actual_did });
+            return error.DidKeyMismatch;
+        }
+        tested += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 5), tested);
+}
+
+test "interop: did:key derivation P256" {
+    const allocator = std.testing.allocator;
+
+    const fixture_json = @embedFile("w3c_didkey_P256");
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, fixture_json, .{});
+    defer parsed.deinit();
+
+    const fixtures = parsed.value.array.items;
+    var tested: usize = 0;
+
+    for (fixtures) |fixture| {
+        const obj = fixture.object;
+        const b58_str = obj.get("privateKeyBytesBase58").?.string;
+        const expected_did = obj.get("publicDidKey").?.string;
+
+        // raw base58 (no multibase 'z' prefix)
+        const decoded = try multibase.base58btc.decode(allocator, b58_str);
+        defer allocator.free(decoded);
+        if (decoded.len < 32) return error.KeyTooShort;
+
+        const kp = try Keypair.fromSecretKey(.p256, decoded[0..32].*);
+        const actual_did = try kp.did(allocator);
+        defer allocator.free(actual_did);
+
+        if (!std.mem.eql(u8, actual_did, expected_did)) {
+            std.debug.print("FAIL P256: expected {s}, got {s}\n", .{ expected_did, actual_did });
+            return error.DidKeyMismatch;
+        }
+        tested += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), tested);
+}
+
+// === tier 2c: data model round-trip ===
+
+/// convert AT Protocol JSON to CBOR value
+/// handles $link (CID) and $bytes (byte string) special types
+fn jsonToCbor(allocator: std.mem.Allocator, json: std.json.Value) !cbor.Value {
+    switch (json) {
+        .object => |obj| {
+            // check for $link → CID
+            if (obj.get("$link")) |link_val| {
+                const link_str = switch (link_val) {
+                    .string => |s| s,
+                    else => return error.InvalidLink,
+                };
+                // bafyrei... is base32lower multibase (without 'b' prefix in the $link value,
+                // but CID strings in AT Protocol use the full multibase-prefixed form)
+                // actually the fixture CIDs start with "bafyrei" which is base32lower with 'b' prefix
+                const raw = try multibase.base32lower.decode(allocator, link_str[1..]);
+                return .{ .cid = .{ .raw = raw } };
+            }
+            // check for $bytes → byte string
+            if (obj.get("$bytes")) |bytes_val| {
+                const b64_str = switch (bytes_val) {
+                    .string => |s| s,
+                    else => return error.InvalidBytes,
+                };
+                const decoded = try base64StdDecode(allocator, b64_str);
+                return .{ .bytes = decoded };
+            }
+            // regular object → map
+            const entries = try allocator.alloc(cbor.Value.MapEntry, obj.count());
+            var i: usize = 0;
+            var it = obj.iterator();
+            while (it.next()) |kv| {
+                entries[i] = .{
+                    .key = kv.key_ptr.*,
+                    .value = try jsonToCbor(allocator, kv.value_ptr.*),
+                };
+                i += 1;
+            }
+            return .{ .map = entries };
+        },
+        .array => |arr| {
+            const items = try allocator.alloc(cbor.Value, arr.items.len);
+            for (arr.items, 0..) |item, i| {
+                items[i] = try jsonToCbor(allocator, item);
+            }
+            return .{ .array = items };
+        },
+        .string => |s| return .{ .text = s },
+        .integer => |n| {
+            if (n >= 0) return .{ .unsigned = @intCast(n) };
+            return .{ .negative = n };
+        },
+        .float => |f| {
+            // DAG-CBOR has no floats; coerce integer-valued floats
+            const int_val: i64 = @intFromFloat(f);
+            if (@as(f64, @floatFromInt(int_val)) != f) return error.UnsupportedFloat;
+            if (int_val >= 0) return .{ .unsigned = @intCast(int_val) };
+            return .{ .negative = int_val };
+        },
+        .null => return .null,
+        .bool => |b| return .{ .boolean = b },
+        .number_string => return error.UnsupportedNumberString,
+    }
+}
+
+test "interop: data model fixtures" {
+    const allocator = std.testing.allocator;
+
+    const fixture_json = @embedFile("data_model_fixtures");
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, fixture_json, .{});
+    defer parsed.deinit();
+
+    const fixtures = parsed.value.array.items;
+    var tested: usize = 0;
+
+    for (fixtures) |fixture| {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        const obj = fixture.object;
+        const json_val = obj.get("json").?;
+        const expected_cbor_b64 = obj.get("cbor_base64").?.string;
+        const expected_cid_str = obj.get("cid").?.string;
+
+        // convert JSON → CBOR value → encoded bytes
+        const cbor_val = try jsonToCbor(a, json_val);
+        const encoded = try cbor.encodeAlloc(a, cbor_val);
+
+        // compare encoded bytes with expected
+        const expected_bytes = try base64StdDecode(a, expected_cbor_b64);
+        if (!std.mem.eql(u8, encoded, expected_bytes)) {
+            std.debug.print("FAIL data model: CBOR encoding mismatch for fixture {d}\n", .{tested});
+            std.debug.print("  expected ({d} bytes): ", .{expected_bytes.len});
+            for (expected_bytes) |b| std.debug.print("{x:0>2}", .{b});
+            std.debug.print("\n  actual   ({d} bytes): ", .{encoded.len});
+            for (encoded) |b| std.debug.print("{x:0>2}", .{b});
+            std.debug.print("\n", .{});
+            return error.CborEncodingMismatch;
+        }
+
+        // compute CID and compare
+        const cid = try cbor.Cid.forDagCbor(a, encoded);
+        // format as base32lower multibase string: "b" + base32lower(raw)
+        const cid_str = try multibase.base32lower.encode(a, cid.raw);
+        if (!std.mem.eql(u8, cid_str, expected_cid_str)) {
+            std.debug.print("FAIL data model: CID mismatch for fixture {d}\n", .{tested});
+            std.debug.print("  expected: {s}\n  actual:   {s}\n", .{ expected_cid_str, cid_str });
+            return error.CidMismatch;
+        }
+
+        tested += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), tested);
 }
 
 // === tier 3: MST ===

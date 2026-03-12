@@ -38,6 +38,10 @@ pub fn build(b: *std.Build) void {
             .{ "aturi_syntax_invalid", "syntax/aturi_syntax_invalid.txt" },
             // crypto fixtures
             .{ "signature_fixtures", "crypto/signature-fixtures.json" },
+            .{ "w3c_didkey_K256", "crypto/w3c_didkey_K256.json" },
+            .{ "w3c_didkey_P256", "crypto/w3c_didkey_P256.json" },
+            // data model fixtures
+            .{ "data_model_fixtures", "data-model/data-model-fixtures.json" },
             // mst fixtures
             .{ "mst_key_heights", "mst/key_heights.json" },
             .{ "common_prefix", "mst/common_prefix.json" },

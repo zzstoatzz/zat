@@ -18,6 +18,8 @@ pub const Keypair = struct {
     /// create a keypair from raw secret key bytes (32 bytes).
     /// validates the key is on the curve.
     pub fn fromSecretKey(key_type: multicodec.KeyType, secret_key: [32]u8) !Keypair {
+        // zero is not a valid scalar for any curve
+        if (std.mem.allEqual(u8, &secret_key, 0)) return error.InvalidSecretKey;
         // validate by attempting to construct the stdlib key
         switch (key_type) {
             .secp256k1 => {
