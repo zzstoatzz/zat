@@ -74,6 +74,82 @@ pub const Keypair = struct {
             .p256 => .ES256,
         };
     }
+
+    /// return the uncompressed SEC1 public key (65 bytes: 0x04 || x[32] || y[32]).
+    pub fn uncompressedPublicKey(self: *const Keypair) ![65]u8 {
+        switch (self.key_type) {
+            .secp256k1 => {
+                const Scheme = crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
+                const sk = Scheme.SecretKey.fromBytes(self.secret_key) catch return error.InvalidSecretKey;
+                const kp = Scheme.KeyPair.fromSecretKey(sk) catch return error.InvalidSecretKey;
+                return kp.public_key.toUncompressedSec1();
+            },
+            .p256 => {
+                const Scheme = crypto.sign.ecdsa.EcdsaP256Sha256;
+                const sk = Scheme.SecretKey.fromBytes(self.secret_key) catch return error.InvalidSecretKey;
+                const kp = Scheme.KeyPair.fromSecretKey(sk) catch return error.InvalidSecretKey;
+                return kp.public_key.toUncompressedSec1();
+            },
+        }
+    }
+
+    /// format the public key as a JWK JSON string.
+    /// includes kty, crv, x, y, kid (thumbprint), use, alg.
+    /// caller owns the returned slice.
+    pub fn jwk(self: *const Keypair, allocator: std.mem.Allocator) ![]u8 {
+        const uncompressed = try self.uncompressedPublicKey();
+        const x_b64 = try jwt.base64UrlEncode(allocator, uncompressed[1..33]);
+        defer allocator.free(x_b64);
+        const y_b64 = try jwt.base64UrlEncode(allocator, uncompressed[33..65]);
+        defer allocator.free(y_b64);
+
+        const crv = switch (self.key_type) {
+            .p256 => "P-256",
+            .secp256k1 => "secp256k1",
+        };
+        const alg = @tagName(self.algorithm());
+
+        // RFC 7638 thumbprint inline — avoids re-deriving the public key
+        const canonical = try std.fmt.allocPrint(allocator,
+            \\{{"crv":"{s}","kty":"EC","x":"{s}","y":"{s}"}}
+        , .{ crv, x_b64, y_b64 });
+        defer allocator.free(canonical);
+
+        var hash: [32]u8 = undefined;
+        crypto.hash.sha2.Sha256.hash(canonical, &hash, .{});
+        const kid = try jwt.base64UrlEncode(allocator, &hash);
+        defer allocator.free(kid);
+
+        return std.fmt.allocPrint(allocator,
+            \\{{"kty":"EC","crv":"{s}","x":"{s}","y":"{s}","kid":"{s}","use":"sig","alg":"{s}"}}
+        , .{ crv, x_b64, y_b64, kid, alg });
+    }
+
+    /// compute the JWK thumbprint (RFC 7638) as a base64url string.
+    /// canonical form: {"crv":"...","kty":"EC","x":"...","y":"..."}
+    /// caller owns the returned slice.
+    pub fn jwkThumbprint(self: *const Keypair, allocator: std.mem.Allocator) ![]u8 {
+        const uncompressed = try self.uncompressedPublicKey();
+        const x_b64 = try jwt.base64UrlEncode(allocator, uncompressed[1..33]);
+        defer allocator.free(x_b64);
+        const y_b64 = try jwt.base64UrlEncode(allocator, uncompressed[33..65]);
+        defer allocator.free(y_b64);
+
+        const crv = switch (self.key_type) {
+            .p256 => "P-256",
+            .secp256k1 => "secp256k1",
+        };
+
+        // RFC 7638: required members in lexicographic order
+        const canonical = try std.fmt.allocPrint(allocator,
+            \\{{"crv":"{s}","kty":"EC","x":"{s}","y":"{s}"}}
+        , .{ crv, x_b64, y_b64 });
+        defer allocator.free(canonical);
+
+        var hash: [32]u8 = undefined;
+        crypto.hash.sha2.Sha256.hash(canonical, &hash, .{});
+        return jwt.base64UrlEncode(allocator, &hash);
+    }
 };
 
 // === tests ===
@@ -154,6 +230,77 @@ test "keypair rejects invalid secret key" {
     // all-zeros is not a valid scalar for either curve
     try std.testing.expectError(error.InvalidSecretKey, Keypair.fromSecretKey(.secp256k1, .{0x00} ** 32));
     try std.testing.expectError(error.InvalidSecretKey, Keypair.fromSecretKey(.p256, .{0x00} ** 32));
+}
+
+test "keypair jwk p256 round-trip" {
+    const alloc = std.testing.allocator;
+    const kp = try Keypair.fromSecretKey(.p256, .{
+        0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+        0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
+        0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+        0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40,
+    });
+
+    const jwk_json = try kp.jwk(alloc);
+    defer alloc.free(jwk_json);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, jwk_json, .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("EC", obj.get("kty").?.string);
+    try std.testing.expectEqualStrings("P-256", obj.get("crv").?.string);
+    try std.testing.expectEqualStrings("ES256", obj.get("alg").?.string);
+    try std.testing.expectEqualStrings("sig", obj.get("use").?.string);
+    try std.testing.expect(obj.get("x") != null);
+    try std.testing.expect(obj.get("y") != null);
+    try std.testing.expect(obj.get("kid") != null);
+}
+
+test "keypair jwk secp256k1 round-trip" {
+    const alloc = std.testing.allocator;
+    const kp = try Keypair.fromSecretKey(.secp256k1, .{
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+        0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+    });
+
+    const jwk_json = try kp.jwk(alloc);
+    defer alloc.free(jwk_json);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, jwk_json, .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("EC", obj.get("kty").?.string);
+    try std.testing.expectEqualStrings("secp256k1", obj.get("crv").?.string);
+    try std.testing.expectEqualStrings("ES256K", obj.get("alg").?.string);
+    try std.testing.expectEqualStrings("sig", obj.get("use").?.string);
+}
+
+test "keypair jwk thumbprint matches kid" {
+    const alloc = std.testing.allocator;
+    const kp = try Keypair.fromSecretKey(.p256, .{
+        0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+        0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
+        0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+        0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40,
+    });
+
+    // get thumbprint directly
+    const thumbprint = try kp.jwkThumbprint(alloc);
+    defer alloc.free(thumbprint);
+
+    // get kid from JWK
+    const jwk_json = try kp.jwk(alloc);
+    defer alloc.free(jwk_json);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, jwk_json, .{});
+    defer parsed.deinit();
+
+    const kid = parsed.value.object.get("kid").?.string;
+    try std.testing.expectEqualStrings(thumbprint, kid);
 }
 
 test "keypair cross-verify: sign with keypair, verify with jwt.verify" {

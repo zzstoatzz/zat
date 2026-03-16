@@ -161,13 +161,21 @@ pub const Jwt = struct {
 
 // === internal helpers ===
 
-fn base64UrlDecode(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+pub fn base64UrlDecode(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     const decoder = &std.base64.url_safe_no_pad.Decoder;
     const size = try decoder.calcSizeForSlice(input);
     const output = try allocator.alloc(u8, size);
     errdefer allocator.free(output);
     try decoder.decode(output, input);
     return output;
+}
+
+pub fn base64UrlEncode(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    const encoder = &std.base64.url_safe_no_pad.Encoder;
+    const len = encoder.calcSize(data.len);
+    const buf = try allocator.alloc(u8, len);
+    _ = encoder.encode(buf, data);
+    return buf;
 }
 
 fn parseHeader(allocator: std.mem.Allocator, header_json: []const u8) !Header {
