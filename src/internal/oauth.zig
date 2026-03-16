@@ -1,7 +1,7 @@
 //! OAuth client primitives for AT Protocol
 //!
 //! PKCE, DPoP proofs, client assertions, and related helpers
-//! for implementing AT Protocol OAuth 2.0 flows.
+//! for implementing AT Protocol OAuth flows (based on OAuth 2.1).
 //!
 //! see: https://atproto.com/specs/oauth
 
