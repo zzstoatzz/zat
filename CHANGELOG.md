@@ -3,7 +3,7 @@
 ## 0.2.17
 
 - **feat**: `Keypair.jwk()`, `Keypair.jwkThumbprint()`, `Keypair.uncompressedPublicKey()` — JWK export and RFC 7638 thumbprints for both P-256 and secp256k1
-- **feat**: `oauth` module — stateless PKCE, DPoP proofs, client assertions, form encoding, and related helpers for AT Protocol OAuth 2.0 flows
+- **feat**: `oauth` module — stateless PKCE, DPoP proofs, client assertions, form encoding, and related helpers for AT Protocol OAuth flows (based on OAuth 2.1)
 - **feat**: `jwt.base64UrlEncode`, `jwt.base64UrlDecode` now public
 - **test**: interop tests for did:key derivation and data model fixtures
 
