@@ -1,5 +1,12 @@
 # changelog
 
+## 0.2.17
+
+- **feat**: `Keypair.jwk()`, `Keypair.jwkThumbprint()`, `Keypair.uncompressedPublicKey()` — JWK export and RFC 7638 thumbprints for both P-256 and secp256k1
+- **feat**: `oauth` module — stateless PKCE, DPoP proofs, client assertions, form encoding, and related helpers for AT Protocol OAuth 2.0 flows
+- **feat**: `jwt.base64UrlEncode`, `jwt.base64UrlDecode` now public
+- **test**: interop tests for did:key derivation and data model fixtures
+
 ## 0.2.16
 
 - **fix**: bump websocket.zig to `395d0f4` — reads full HTTP body on TCP split writes (fixes empty body when headers and body arrive in separate TCP segments)
