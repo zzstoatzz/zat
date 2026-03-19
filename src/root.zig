@@ -17,6 +17,7 @@ pub const DidResolver = @import("internal/identity/did_resolver.zig").DidResolve
 pub const HandleResolver = @import("internal/identity/handle_resolver.zig").HandleResolver;
 
 // xrpc
+pub const HttpTransport = @import("internal/xrpc/transport.zig").HttpTransport;
 pub const XrpcClient = @import("internal/xrpc/xrpc.zig").XrpcClient;
 
 // json helpers

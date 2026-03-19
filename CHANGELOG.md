@@ -1,5 +1,9 @@
 # changelog
 
+## 0.2.18
+
+- **feat**: export `HttpTransport` from root module — consumers can now use `zat.HttpTransport` for direct HTTP access without going through `XrpcClient`
+
 ## 0.2.17
 
 - **feat**: `Keypair.jwk()`, `Keypair.jwkThumbprint()`, `Keypair.uncompressedPublicKey()` — JWK export and RFC 7638 thumbprints for both P-256 and secp256k1
