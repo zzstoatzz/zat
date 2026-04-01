@@ -281,7 +281,7 @@ fn WsHandler(comptime H: type) type {
 /// disappears without FIN/RST (network partition, crash, power loss).
 /// detection time: 10s idle + 5s × 2 probes = 20s.
 fn configureKeepalive(client: *websocket.Client) void {
-    const fd = client.stream.stream.handle;
+    const fd = client.stream.stream.socket.handle;
     const builtin = @import("builtin");
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.KEEPALIVE, &std.mem.toBytes(@as(i32, 1))) catch return;
     const tcp: i32 = @intCast(posix.IPPROTO.TCP);
