@@ -76,7 +76,7 @@ pub fn readWithOptions(allocator: Allocator, data: []const u8, options: ReadOpti
     const header = cbor.decodeAll(allocator, header_bytes) catch return error.InvalidHeader;
 
     // extract roots (array of CID links)
-    var roots: std.ArrayList(cbor.Cid) = .{};
+    var roots: std.ArrayList(cbor.Cid) = .empty;
     if (header.getArray("roots")) |root_values| {
         for (root_values) |root_val| {
             switch (root_val) {
@@ -89,7 +89,7 @@ pub fn readWithOptions(allocator: Allocator, data: []const u8, options: ReadOpti
     pos = header_end;
 
     // read blocks
-    var blocks: std.ArrayList(Block) = .{};
+    var blocks: std.ArrayList(Block) = .empty;
     var block_index: std.StringHashMapUnmanaged([]const u8) = .empty;
 
     while (pos < data.len) {
@@ -190,7 +190,7 @@ pub fn findBlock(c: Car, cid_raw: []const u8) ?[]const u8 {
 /// where each block is: [varint block_len] [CID bytes] [data bytes]
 pub fn write(allocator: Allocator, writer: anytype, c: Car) !void {
     // build header: {"roots": [...CID links...], "version": 1}
-    var root_values: std.ArrayList(cbor.Value) = .{};
+    var root_values: std.ArrayList(cbor.Value) = .empty;
     defer root_values.deinit(allocator);
     for (c.roots) |root| {
         try root_values.append(allocator, .{ .cid = root });
@@ -220,10 +220,10 @@ pub fn write(allocator: Allocator, writer: anytype, c: Car) !void {
 
 /// write a CAR v1 file to a freshly allocated byte slice
 pub fn writeAlloc(allocator: Allocator, c: Car) ![]u8 {
-    var list: std.ArrayList(u8) = .{};
-    errdefer list.deinit(allocator);
-    try write(allocator, list.writer(allocator), c);
-    return try list.toOwnedSlice(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try write(allocator, &aw.writer, c);
+    return try aw.toOwnedSlice();
 }
 
 // === tests ===
@@ -331,12 +331,12 @@ test "read CAR with roots" {
     const header_bytes = try cbor.encodeAlloc(alloc, header_value);
 
     // assemble minimal CAR: header only, no blocks
-    var car_buf: std.ArrayList(u8) = .{};
-    defer car_buf.deinit(alloc);
-    try cbor.writeUvarint(car_buf.writer(alloc), header_bytes.len);
-    try car_buf.appendSlice(alloc, header_bytes);
+    var car_aw: std.Io.Writer.Allocating = .init(alloc);
+    defer car_aw.deinit();
+    try cbor.writeUvarint(&car_aw.writer, header_bytes.len);
+    try car_aw.writer.writeAll(header_bytes);
 
-    const car_file = try read(alloc, car_buf.items);
+    const car_file = try read(alloc, car_aw.written());
     try std.testing.expectEqual(@as(usize, 1), car_file.roots.len);
     try std.testing.expectEqual(root_cid.version().?, car_file.roots[0].version().?);
     try std.testing.expectEqual(root_cid.codec().?, car_file.roots[0].codec().?);

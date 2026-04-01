@@ -11,6 +11,12 @@ const json = @import("../xrpc/json.zig");
 const multibase = @import("multibase.zig");
 const multicodec = @import("multicodec.zig");
 
+fn timestamp() i64 {
+    var tv: std.c.timeval = undefined;
+    _ = std.c.gettimeofday(&tv, null);
+    return tv.sec;
+}
+
 /// JWT signing algorithm
 pub const Algorithm = enum {
     ES256, // P-256 / secp256r1
@@ -140,13 +146,13 @@ pub const Jwt = struct {
 
     /// check if the token is expired
     pub fn isExpired(self: *const Jwt) bool {
-        const now = std.time.timestamp();
+        const now = timestamp();
         return now > self.payload.exp;
     }
 
     /// check if the token is expired with clock skew tolerance (in seconds)
     pub fn isExpiredWithSkew(self: *const Jwt, skew_seconds: i64) bool {
-        const now = std.time.timestamp();
+        const now = timestamp();
         return now > (self.payload.exp + skew_seconds);
     }
 

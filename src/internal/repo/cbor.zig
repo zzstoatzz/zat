@@ -201,16 +201,15 @@ pub const Cid = struct {
         var hash: [Sha256.digest_length]u8 = undefined;
         Sha256.hash(data, &hash, .{});
 
-        var raw_buf: std.ArrayList(u8) = .{};
-        errdefer raw_buf.deinit(allocator);
-        const writer = raw_buf.writer(allocator);
-        try writeUvarint(writer, ver);
-        try writeUvarint(writer, cod);
-        try writeUvarint(writer, hash_fn_code);
-        try writeUvarint(writer, Sha256.digest_length);
-        try writer.writeAll(&hash);
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        errdefer aw.deinit();
+        try writeUvarint(&aw.writer, ver);
+        try writeUvarint(&aw.writer, cod);
+        try writeUvarint(&aw.writer, hash_fn_code);
+        try writeUvarint(&aw.writer, Sha256.digest_length);
+        try aw.writer.writeAll(&hash);
 
-        return .{ .raw = try raw_buf.toOwnedSlice(allocator) };
+        return .{ .raw = try aw.toOwnedSlice() };
     }
 
     /// serialize this CID to raw bytes (version varint + codec varint + multihash)
@@ -487,10 +486,10 @@ pub fn encode(allocator: Allocator, writer: anytype, value: Value) !void {
 
 /// encode a Value to a freshly allocated byte slice
 pub fn encodeAlloc(allocator: Allocator, value: Value) ![]u8 {
-    var list: std.ArrayList(u8) = .{};
-    errdefer list.deinit(allocator);
-    try encode(allocator, list.writer(allocator), value);
-    return try list.toOwnedSlice(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try encode(allocator, &aw.writer, value);
+    return try aw.toOwnedSlice();
 }
 
 /// write an unsigned varint (LEB128) — used for CID and CAR serialization

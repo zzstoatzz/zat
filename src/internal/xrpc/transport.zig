@@ -1,38 +1,23 @@
-//! HTTP Transport - isolates HTTP client for 0.16 migration
+//! HTTP Transport - wraps std.http.Client for AT Protocol requests
 //!
-//! wraps std.http.Client to provide a single point of change
-//! when zig 0.16 moves HTTP to std.Io interface.
-//!
-//! 0.16 migration plan:
-//! - add `io: std.Io` field
-//! - add `initWithIo(io: std.Io, allocator: Allocator)` constructor
-//! - update fetch() to use io.http or equivalent
+//! provides a simple fetch() interface over zig's HTTP client.
+//! requires std.Io for networking (zig 0.16+).
 
 const std = @import("std");
 
 pub const HttpTransport = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     http_client: std.http.Client,
     keep_alive: bool = true,
 
-    // 0.16: will add
-    // io: ?std.Io = null,
-
-    pub fn init(allocator: std.mem.Allocator) HttpTransport {
+    pub fn init(io: std.Io, allocator: std.mem.Allocator) HttpTransport {
         return .{
             .allocator = allocator,
-            .http_client = .{ .allocator = allocator },
+            .io = io,
+            .http_client = .{ .allocator = allocator, .io = io },
         };
     }
-
-    // 0.16: will add
-    // pub fn initWithIo(io: std.Io, allocator: std.mem.Allocator) HttpTransport {
-    //     return .{
-    //         .allocator = allocator,
-    //         .http_client = .{ .allocator = allocator },
-    //         .io = io,
-    //     };
-    // }
 
     pub fn deinit(self: *HttpTransport) void {
         self.http_client.deinit();
@@ -109,6 +94,7 @@ pub const HttpTransport = struct {
 // === tests ===
 
 test "transport init/deinit" {
-    var transport = HttpTransport.init(std.testing.allocator);
+    const io = std.Options.debug_io;
+    var transport = HttpTransport.init(io, std.testing.allocator);
     defer transport.deinit();
 }

@@ -22,10 +22,10 @@ pub const XrpcClient = struct {
     /// atproto JWTs are ~1KB; buffer needs room for "Bearer " prefix
     const max_auth_header_len = 2048;
 
-    pub fn init(allocator: std.mem.Allocator, host: []const u8) XrpcClient {
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, host: []const u8) XrpcClient {
         return .{
             .allocator = allocator,
-            .transport = HttpTransport.init(allocator),
+            .transport = HttpTransport.init(io, allocator),
             .host = host,
         };
     }
@@ -130,7 +130,7 @@ pub const XrpcClient = struct {
 // === tests ===
 
 test "build url without params" {
-    var client = XrpcClient.init(std.testing.allocator, "https://bsky.social");
+    var client = XrpcClient.init(std.Options.debug_io, std.testing.allocator, "https://bsky.social");
     defer client.deinit();
 
     const nsid = Nsid.parse("app.bsky.actor.getProfile").?;
@@ -141,7 +141,7 @@ test "build url without params" {
 }
 
 test "build url with params" {
-    var client = XrpcClient.init(std.testing.allocator, "https://bsky.social");
+    var client = XrpcClient.init(std.Options.debug_io, std.testing.allocator, "https://bsky.social");
     defer client.deinit();
 
     var params = std.StringHashMap([]const u8).init(std.testing.allocator);

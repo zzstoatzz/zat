@@ -13,6 +13,7 @@ const sync = @import("sync.zig");
 const mem = std.mem;
 const json = std.json;
 const posix = std.posix;
+const libc = std.c;
 const Allocator = mem.Allocator;
 const log = std.log.scoped(.zat);
 
@@ -180,7 +181,7 @@ pub const JetstreamClient = struct {
 
             prev_host_index = effective_index;
             host_index += 1;
-            posix.nanosleep(backoff, 0);
+            _ = libc.nanosleep(&.{ .sec = @intCast(backoff), .nsec = 0 }, null);
             backoff = @min(backoff * 2, max_backoff);
         }
     }

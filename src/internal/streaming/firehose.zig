@@ -18,6 +18,7 @@ const sync = @import("sync.zig");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const posix = std.posix;
+const libc = std.c;
 const log = std.log.scoped(.zat);
 
 pub const CommitAction = sync.CommitAction;
@@ -161,7 +162,7 @@ fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
     }
 
     // parse blobs array (array of CID links)
-    var blobs: std.ArrayList(cbor.Cid) = .{};
+    var blobs: std.ArrayList(cbor.Cid) = .empty;
     if (payload.getArray("blobs")) |blob_values| {
         for (blob_values) |blob_val| {
             switch (blob_val) {
@@ -180,7 +181,7 @@ fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
 
     // parse ops
     const ops_array = payload.getArray("ops");
-    var ops: std.ArrayList(RepoOp) = .{};
+    var ops: std.ArrayList(RepoOp) = .empty;
 
     if (ops_array) |op_values| {
         for (op_values) |op_val| {
@@ -257,9 +258,8 @@ fn decodeAccount(payload: cbor.Value) DecodeError!Event {
 
 /// encode a firehose Event into a wire frame: [DAG-CBOR header] [DAG-CBOR payload]
 pub fn encodeFrame(allocator: Allocator, event: Event) ![]u8 {
-    var list: std.ArrayList(u8) = .{};
-    errdefer list.deinit(allocator);
-    const writer = list.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
 
     const tag = switch (event) {
         .commit => "#commit",
@@ -273,26 +273,26 @@ pub fn encodeFrame(allocator: Allocator, event: Event) ![]u8 {
         .{ .key = "op", .value = .{ .unsigned = 1 } },
         .{ .key = "t", .value = .{ .text = tag } },
     } };
-    try cbor.encode(allocator, writer, header);
+    try cbor.encode(allocator, &aw.writer, header);
 
     // encode payload based on event type
     switch (event) {
-        .commit => |c| try encodeCommitPayload(allocator, writer, c),
-        .identity => |i| try encodeIdentityPayload(allocator, writer, i),
-        .account => |a| try encodeAccountPayload(allocator, writer, a),
-        .info => |inf| try encodeInfoPayload(allocator, writer, inf),
+        .commit => |commit| try encodeCommitPayload(allocator, &aw.writer, commit),
+        .identity => |id| try encodeIdentityPayload(allocator, &aw.writer, id),
+        .account => |acct| try encodeAccountPayload(allocator, &aw.writer, acct),
+        .info => |inf| try encodeInfoPayload(allocator, &aw.writer, inf),
     }
 
-    return try list.toOwnedSlice(allocator);
+    return try aw.toOwnedSlice();
 }
 
 fn encodeCommitPayload(allocator: Allocator, writer: anytype, commit: CommitEvent) !void {
     // build ops array and CAR blocks simultaneously
-    var op_values: std.ArrayList(cbor.Value) = .{};
+    var op_values: std.ArrayList(cbor.Value) = .empty;
     defer op_values.deinit(allocator);
-    var car_blocks: std.ArrayList(car.Block) = .{};
+    var car_blocks: std.ArrayList(car.Block) = .empty;
     defer car_blocks.deinit(allocator);
-    var root_cids: std.ArrayList(cbor.Cid) = .{};
+    var root_cids: std.ArrayList(cbor.Cid) = .empty;
     defer root_cids.deinit(allocator);
 
     for (commit.ops) |op| {
@@ -334,14 +334,14 @@ fn encodeCommitPayload(allocator: Allocator, writer: anytype, commit: CommitEven
     const blocks_bytes = try car.writeAlloc(allocator, car_data);
 
     // build blobs array
-    var blob_values: std.ArrayList(cbor.Value) = .{};
+    var blob_values: std.ArrayList(cbor.Value) = .empty;
     defer blob_values.deinit(allocator);
     for (commit.blobs) |blob| {
         try blob_values.append(allocator, .{ .cid = blob });
     }
 
     // build payload entries
-    var entries: std.ArrayList(cbor.Value.MapEntry) = .{};
+    var entries: std.ArrayList(cbor.Value.MapEntry) = .empty;
     defer entries.deinit(allocator);
 
     try entries.append(allocator, .{ .key = "blocks", .value = .{ .bytes = blocks_bytes } });
@@ -365,7 +365,7 @@ fn encodeCommitPayload(allocator: Allocator, writer: anytype, commit: CommitEven
 }
 
 fn encodeIdentityPayload(allocator: Allocator, writer: anytype, identity: IdentityEvent) !void {
-    var entries: std.ArrayList(cbor.Value.MapEntry) = .{};
+    var entries: std.ArrayList(cbor.Value.MapEntry) = .empty;
     defer entries.deinit(allocator);
 
     try entries.append(allocator, .{ .key = "did", .value = .{ .text = identity.did } });
@@ -379,7 +379,7 @@ fn encodeIdentityPayload(allocator: Allocator, writer: anytype, identity: Identi
 }
 
 fn encodeAccountPayload(allocator: Allocator, writer: anytype, account: AccountEvent) !void {
-    var entries: std.ArrayList(cbor.Value.MapEntry) = .{};
+    var entries: std.ArrayList(cbor.Value.MapEntry) = .empty;
     defer entries.deinit(allocator);
 
     if (!account.active) {
@@ -396,7 +396,7 @@ fn encodeAccountPayload(allocator: Allocator, writer: anytype, account: AccountE
 }
 
 fn encodeInfoPayload(allocator: Allocator, writer: anytype, info: InfoEvent) !void {
-    var entries: std.ArrayList(cbor.Value.MapEntry) = .{};
+    var entries: std.ArrayList(cbor.Value.MapEntry) = .empty;
     defer entries.deinit(allocator);
 
     if (info.message) |m| {
@@ -456,7 +456,7 @@ pub const FirehoseClient = struct {
 
             prev_host_index = effective_index;
             host_index += 1;
-            posix.nanosleep(backoff, 0);
+            _ = libc.nanosleep(&.{ .sec = @intCast(backoff), .nsec = 0 }, null);
             backoff = @min(backoff * 2, max_backoff);
         }
     }

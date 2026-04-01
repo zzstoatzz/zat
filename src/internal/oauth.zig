@@ -11,6 +11,12 @@ const Allocator = std.mem.Allocator;
 const Keypair = @import("crypto/keypair.zig").Keypair;
 const jwt = @import("crypto/jwt.zig");
 
+fn timestamp() i64 {
+    var tv: std.c.timeval = undefined;
+    _ = std.c.gettimeofday(&tv, null);
+    return tv.sec;
+}
+
 /// create a signed JWT from header and payload JSON strings.
 /// caller owns returned slice.
 pub fn createJwt(allocator: Allocator, header_json: []const u8, payload_json: []const u8, keypair: *const Keypair) ![]u8 {
@@ -35,6 +41,7 @@ pub fn createJwt(allocator: Allocator, header_json: []const u8, payload_json: []
 /// ath: optional access token hash (base64url-encoded SHA-256).
 pub fn createDpopProof(
     allocator: Allocator,
+    io: std.Io,
     keypair: *const Keypair,
     htm: []const u8,
     htu: []const u8,
@@ -44,11 +51,11 @@ pub fn createDpopProof(
     const jwk_json = try keypair.jwk(allocator);
     defer allocator.free(jwk_json);
 
-    const jti = try generateJti(allocator);
+    const jti = try generateJti(allocator, io);
     defer allocator.free(jti);
 
     const alg = @tagName(keypair.algorithm());
-    const now = std.time.timestamp();
+    const now = timestamp();
 
     // header: {"typ":"dpop+jwt","alg":"...","jwk":{...}}
     const header = try std.fmt.allocPrint(allocator,
@@ -57,42 +64,42 @@ pub fn createDpopProof(
     defer allocator.free(header);
 
     // payload — build with writer for optional fields
-    var payload_buf: std.ArrayList(u8) = .{};
-    defer payload_buf.deinit(allocator);
-    const writer = payload_buf.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
 
-    try writer.print(
+    try aw.writer.print(
         \\{{"jti":"{s}","htm":"{s}","htu":"{s}","iat":{d}
     , .{ jti, htm, htu, now });
 
     if (nonce) |n| {
-        try writer.print(",\"nonce\":\"{s}\"", .{n});
+        try aw.writer.print(",\"nonce\":\"{s}\"", .{n});
     }
     if (ath) |a| {
-        try writer.print(",\"ath\":\"{s}\"", .{a});
+        try aw.writer.print(",\"ath\":\"{s}\"", .{a});
     }
 
-    try writer.writeAll("}");
+    try aw.writer.writeAll("}");
 
-    return createJwt(allocator, header, payload_buf.items, keypair);
+    return createJwt(allocator, header, aw.written(), keypair);
 }
 
 /// create a private_key_jwt client assertion for token endpoint auth.
 /// client_id: the OAuth client ID, aud: the token endpoint URL.
 pub fn createClientAssertion(
     allocator: Allocator,
+    io: std.Io,
     keypair: *const Keypair,
     client_id: []const u8,
     aud: []const u8,
 ) ![]u8 {
-    const jti = try generateJti(allocator);
+    const jti = try generateJti(allocator, io);
     defer allocator.free(jti);
 
     const kid = try keypair.jwkThumbprint(allocator);
     defer allocator.free(kid);
 
     const alg = @tagName(keypair.algorithm());
-    const now = std.time.timestamp();
+    const now = timestamp();
 
     const header = try std.fmt.allocPrint(allocator,
         \\{{"typ":"JWT","alg":"{s}","kid":"{s}"}}
@@ -109,9 +116,9 @@ pub fn createClientAssertion(
 
 /// generate a random PKCE code verifier (43 chars, base64url-encoded 32 random bytes).
 /// caller owns returned slice.
-pub fn generatePkceVerifier(allocator: Allocator) ![]u8 {
+pub fn generatePkceVerifier(allocator: Allocator, io: std.Io) ![]u8 {
     var random_bytes: [32]u8 = undefined;
-    crypto.random.bytes(&random_bytes);
+    io.random(&random_bytes);
     return jwt.base64UrlEncode(allocator, &random_bytes);
 }
 
@@ -125,9 +132,9 @@ pub fn generatePkceChallenge(allocator: Allocator, verifier: []const u8) ![]u8 {
 
 /// generate a random state parameter (CSRF token).
 /// caller owns returned slice.
-pub fn generateState(allocator: Allocator) ![]u8 {
+pub fn generateState(allocator: Allocator, io: std.Io) ![]u8 {
     var random_bytes: [16]u8 = undefined;
-    crypto.random.bytes(&random_bytes);
+    io.random(&random_bytes);
     return jwt.base64UrlEncode(allocator, &random_bytes);
 }
 
@@ -142,18 +149,17 @@ pub fn accessTokenHash(allocator: Allocator, access_token: []const u8) ![]u8 {
 /// encode key-value pairs as application/x-www-form-urlencoded.
 /// caller owns returned slice.
 pub fn formEncode(allocator: Allocator, params: []const [2][]const u8) ![]u8 {
-    var buf: std.ArrayList(u8) = .{};
-    errdefer buf.deinit(allocator);
-    const writer = buf.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
 
     for (params, 0..) |kv, i| {
-        if (i > 0) try writer.writeAll("&");
-        try percentEncode(writer, kv[0]);
-        try writer.writeAll("=");
-        try percentEncode(writer, kv[1]);
+        if (i > 0) try aw.writer.writeAll("&");
+        try percentEncode(&aw.writer, kv[0]);
+        try aw.writer.writeAll("=");
+        try percentEncode(&aw.writer, kv[1]);
     }
 
-    return buf.toOwnedSlice(allocator);
+    return try aw.toOwnedSlice();
 }
 
 /// format a JWKS JSON containing a single public key.
@@ -169,9 +175,9 @@ pub fn jwksJson(allocator: Allocator, keypair: *const Keypair) ![]u8 {
 
 // --- helpers ---
 
-fn generateJti(allocator: Allocator) ![]u8 {
+fn generateJti(allocator: Allocator, io: std.Io) ![]u8 {
     var random_bytes: [16]u8 = undefined;
-    crypto.random.bytes(&random_bytes);
+    io.random(&random_bytes);
     return jwt.base64UrlEncode(allocator, &random_bytes);
 }
 
@@ -204,7 +210,8 @@ test "PKCE S256 challenge - RFC 7636 test vector" {
 
 test "PKCE verifier is 43 chars" {
     const allocator = std.testing.allocator;
-    const verifier = try generatePkceVerifier(allocator);
+    const io = std.Options.debug_io;
+    const verifier = try generatePkceVerifier(allocator, io);
     defer allocator.free(verifier);
     try std.testing.expectEqual(@as(usize, 43), verifier.len);
 }
@@ -276,6 +283,7 @@ test "createJwt sign and verify round-trip" {
 
 test "DPoP proof structure" {
     const allocator = std.testing.allocator;
+    const io = std.Options.debug_io;
 
     const keypair = try Keypair.fromSecretKey(.p256, .{
         0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
@@ -284,7 +292,7 @@ test "DPoP proof structure" {
         0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40,
     });
 
-    const proof = try createDpopProof(allocator, &keypair, "POST", "https://auth.example.com/token", "server-nonce", null);
+    const proof = try createDpopProof(allocator, io, &keypair, "POST", "https://auth.example.com/token", "server-nonce", null);
     defer allocator.free(proof);
 
     // decode header
@@ -319,6 +327,7 @@ test "DPoP proof structure" {
 
 test "client assertion structure" {
     const allocator = std.testing.allocator;
+    const io = std.Options.debug_io;
 
     const keypair = try Keypair.fromSecretKey(.p256, .{
         0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
@@ -327,7 +336,7 @@ test "client assertion structure" {
         0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40,
     });
 
-    const assertion = try createClientAssertion(allocator, &keypair, "https://app.example.com/client-metadata", "https://bsky.social/oauth/token");
+    const assertion = try createClientAssertion(allocator, io, &keypair, "https://app.example.com/client-metadata", "https://bsky.social/oauth/token");
     defer allocator.free(assertion);
 
     // decode header

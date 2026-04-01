@@ -16,16 +16,16 @@ pub const DidResolver = struct {
     /// plc directory url (default: https://plc.directory)
     plc_url: []const u8 = "https://plc.directory",
 
-    pub fn init(allocator: std.mem.Allocator) DidResolver {
-        return initWithOptions(allocator, .{});
+    pub fn init(io: std.Io, allocator: std.mem.Allocator) DidResolver {
+        return initWithOptions(io, allocator, .{});
     }
 
     pub const Options = struct {
         keep_alive: bool = true,
     };
 
-    pub fn initWithOptions(allocator: std.mem.Allocator, options: Options) DidResolver {
-        var transport = HttpTransport.init(allocator);
+    pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, options: Options) DidResolver {
+        var transport = HttpTransport.init(io, allocator);
         transport.keep_alive = options.keep_alive;
         return .{
             .allocator = allocator,
@@ -113,7 +113,7 @@ test "resolve did:plc - integration" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var resolver = DidResolver.init(arena.allocator());
+    var resolver = DidResolver.init(std.Options.debug_io, arena.allocator());
     defer resolver.deinit();
 
     const did = Did.parse("did:plc:z72i7hdynmk6r22z27h6tvur").?;
@@ -131,7 +131,7 @@ test "resolve did:plc - integration" {
 test "resolve did:plc - leak check (no arena)" {
     // repro for memory leak report: use testing.allocator directly
     // (no arena) to see if std.http.Client leaks on deinit
-    var resolver = DidResolver.init(std.testing.allocator);
+    var resolver = DidResolver.init(std.Options.debug_io, std.testing.allocator);
     defer resolver.deinit();
 
     const did = Did.parse("did:plc:z72i7hdynmk6r22z27h6tvur").?;
@@ -146,7 +146,7 @@ test "resolve did:plc - leak check (no arena)" {
 
 test "did:web url construction" {
     // test url building without network
-    var resolver = DidResolver.init(std.testing.allocator);
+    var resolver = DidResolver.init(std.Options.debug_io, std.testing.allocator);
     defer resolver.deinit();
 
     // simple domain

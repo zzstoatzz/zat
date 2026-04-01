@@ -18,10 +18,10 @@ pub const HandleResolver = struct {
     transport: HttpTransport,
     doh_endpoint: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator) HandleResolver {
+    pub fn init(io: std.Io, allocator: std.mem.Allocator) HandleResolver {
         return .{
             .allocator = allocator,
-            .transport = HttpTransport.init(allocator),
+            .transport = HttpTransport.init(io, allocator),
             .doh_endpoint = "https://cloudflare-dns.com/dns-query",
         };
     }
@@ -163,7 +163,7 @@ test "resolve handle (http) - integration" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var resolver = HandleResolver.init(arena.allocator());
+    var resolver = HandleResolver.init(std.Options.debug_io, arena.allocator());
     defer resolver.deinit();
 
     // resolve a known handle that has .well-known/atproto-did
@@ -183,7 +183,7 @@ test "resolve handle (dns over http) - integration" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var resolver = HandleResolver.init(arena.allocator());
+    var resolver = HandleResolver.init(std.Options.debug_io, arena.allocator());
     defer resolver.deinit();
 
     const handle = Handle.parse("seiso.moe") orelse return error.InvalidHandle;
@@ -202,7 +202,7 @@ test "resolve handle - integration" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var resolver = HandleResolver.init(arena.allocator());
+    var resolver = HandleResolver.init(std.Options.debug_io, arena.allocator());
     defer resolver.deinit();
 
     const handle = Handle.parse("jay.bsky.social") orelse return error.InvalidHandle;

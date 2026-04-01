@@ -142,10 +142,11 @@ pub const VerifyCommitCarError = error{
     SignatureVerificationFailed,
     MstRootMismatch,
     OutOfMemory,
+    WriteFailed,
 };
 
 /// verify a repo end-to-end: resolve identity, fetch repo, verify commit signature, walk and rebuild MST.
-pub fn verifyRepo(caller_alloc: Allocator, identifier: []const u8) !VerifyResult {
+pub fn verifyRepo(io: std.Io, caller_alloc: Allocator, identifier: []const u8) !VerifyResult {
     var arena = std.heap.ArenaAllocator.init(caller_alloc);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -155,7 +156,7 @@ pub fn verifyRepo(caller_alloc: Allocator, identifier: []const u8) !VerifyResult
         identifier
     else blk: {
         const handle = Handle.parse(identifier) orelse return error.InvalidIdentifier;
-        var resolver = HandleResolver.init(allocator);
+        var resolver = HandleResolver.init(io, allocator);
         defer resolver.deinit();
         break :blk try resolver.resolve(handle);
     };
@@ -163,7 +164,7 @@ pub fn verifyRepo(caller_alloc: Allocator, identifier: []const u8) !VerifyResult
     const did = Did.parse(did_str) orelse return error.InvalidIdentifier;
 
     // 2. resolve DID → DID document
-    var did_resolver = DidResolver.init(allocator);
+    var did_resolver = DidResolver.init(io, allocator);
     defer did_resolver.deinit();
     var did_doc = try did_resolver.resolve(did);
     defer did_doc.deinit();
@@ -177,7 +178,7 @@ pub fn verifyRepo(caller_alloc: Allocator, identifier: []const u8) !VerifyResult
     const pds_endpoint = did_doc.pdsEndpoint() orelse return error.PdsEndpointNotFound;
 
     // 5. fetch repo CAR
-    const car_bytes = try fetchRepo(allocator, pds_endpoint, did_str);
+    const car_bytes = try fetchRepo(io, allocator, pds_endpoint, did_str);
 
     // 6-10. verify CAR: signature, commit structure, MST
     const commit_result = verifyCommitCar(allocator, car_bytes, public_key, .{
@@ -202,8 +203,8 @@ pub fn verifyRepo(caller_alloc: Allocator, identifier: []const u8) !VerifyResult
 }
 
 /// fetch a repo CAR from a PDS endpoint
-fn fetchRepo(allocator: Allocator, pds_endpoint: []const u8, did_str: []const u8) ![]u8 {
-    var transport = HttpTransport.init(allocator);
+fn fetchRepo(io: std.Io, allocator: Allocator, pds_endpoint: []const u8, did_str: []const u8) ![]u8 {
+    var transport = HttpTransport.init(io, allocator);
     defer transport.deinit();
 
     // build URL: {pds}/xrpc/com.atproto.sync.getRepo?did={did}
@@ -222,7 +223,7 @@ pub fn encodeUnsignedCommit(allocator: Allocator, commit: cbor.Value) ![]u8 {
     };
 
     // filter out "sig", keep everything else
-    var unsigned_entries: std.ArrayList(cbor.Value.MapEntry) = .{};
+    var unsigned_entries: std.ArrayList(cbor.Value.MapEntry) = .empty;
     for (entries) |entry| {
         if (!std.mem.eql(u8, entry.key, "sig")) {
             try unsigned_entries.append(allocator, entry);
@@ -475,7 +476,7 @@ test "verify repo - zzstoatzz.io" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const result = verifyRepo(arena.allocator(), "zzstoatzz.io") catch |err| {
+    const result = verifyRepo(std.Options.debug_io, arena.allocator(), "zzstoatzz.io") catch |err| {
         std.debug.print("network error (expected in CI): {}\n", .{err});
         return;
     };

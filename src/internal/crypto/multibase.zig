@@ -83,7 +83,7 @@ pub const base58btc = struct {
         }
 
         // repeatedly divide by 58 to extract base58 digits
-        var digits: std.ArrayList(u8) = .{};
+        var digits: std.ArrayList(u8) = .empty;
         defer digits.deinit(allocator);
 
         var divisor = try std.math.big.int.Managed.initSet(allocator, @as(u64, 58));

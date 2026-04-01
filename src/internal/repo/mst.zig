@@ -86,7 +86,7 @@ pub const Node = struct {
     fn init() Node {
         return .{
             .left = .none,
-            .entries = .{},
+            .entries = .empty,
         };
     }
 };
@@ -341,7 +341,7 @@ pub const Mst = struct {
         return .{ .node = merged };
     }
 
-    pub const MstError = error{PartialTree} || Allocator.Error;
+    pub const MstError = error{ PartialTree, WriteFailed } || Allocator.Error;
 
     /// compute the root CID of the tree
     pub fn rootCid(self: *Mst) MstError!cbor.Cid {
@@ -383,7 +383,7 @@ pub const Mst = struct {
         };
 
         // build entry array with prefix compression
-        var entry_values: std.ArrayList(cbor.Value) = .{};
+        var entry_values: std.ArrayList(cbor.Value) = .empty;
         defer entry_values.deinit(self.allocator);
 
         var prev_key: []const u8 = "";
