@@ -60,6 +60,23 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "run unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // jetstream smoke test
+    const jetstream_smoke = b.addExecutable(.{
+        .name = "jetstream-smoke",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("scripts/jetstream_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "zat", .module = mod }},
+        }),
+    });
+    b.installArtifact(jetstream_smoke);
+
+    const run_smoke = b.addRunArtifact(jetstream_smoke);
+    const smoke_step = b.step("smoke", "run jetstream smoke test");
+    smoke_step.dependOn(&run_smoke.step);
+
     // publish-docs script (uses zat to publish docs to ATProto)
     const publish_docs = b.addExecutable(.{
         .name = "publish-docs",

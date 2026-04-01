@@ -29,14 +29,14 @@ pub fn main() !void {
 
     const handle = "zat.dev";
 
-    const password = std.posix.getenv("ATPROTO_PASSWORD") orelse {
+    const password = if (std.c.getenv("ATPROTO_PASSWORD")) |p| std.mem.span(p) else {
         std.debug.print("error: ATPROTO_PASSWORD not set\n", .{});
         return error.MissingEnv;
     };
 
-    const pds = std.posix.getenv("ATPROTO_PDS") orelse "https://bsky.social";
+    const pds = if (std.c.getenv("ATPROTO_PDS")) |p| std.mem.span(p) else "https://bsky.social";
 
-    var client = zat.XrpcClient.init(allocator, pds);
+    var client = zat.XrpcClient.init(std.Options.debug_io, allocator, pds);
     defer client.deinit();
 
     const session = try createSession(&client, allocator, handle, password);
@@ -69,7 +69,7 @@ pub fn main() !void {
     const now = timestamp();
 
     for (docs, 0..) |doc, i| {
-        const content = std.fs.cwd().readFileAlloc(allocator, doc.file, 1024 * 1024) catch |err| {
+        const content = std.Io.Dir.readFileAlloc(.cwd(), std.Options.debug_io, doc.file, allocator, .limited(1024 * 1024)) catch |err| {
             std.debug.print("warning: could not read {s}: {}\n", .{ doc.file, err });
             continue;
         };
@@ -108,7 +108,7 @@ pub fn main() !void {
 
     // publish devlog entries (clock_id 101, 102, ...)
     for (devlog, 0..) |entry, i| {
-        const content = std.fs.cwd().readFileAlloc(allocator, entry.file, 1024 * 1024) catch |err| {
+        const content = std.Io.Dir.readFileAlloc(.cwd(), std.Options.debug_io, entry.file, allocator, .limited(1024 * 1024)) catch |err| {
             std.debug.print("warning: could not read {s}: {}\n", .{ entry.file, err });
             continue;
         };
@@ -236,7 +236,7 @@ fn extractTitle(content: []const u8) ?[]const u8 {
 }
 
 fn timestamp() [20]u8 {
-    const epoch_seconds = std.time.timestamp();
+    const epoch_seconds: i64 = @intCast(@divFloor(std.Io.Timestamp.now(std.Options.debug_io, .real).nanoseconds, std.time.ns_per_s));
     const days: i32 = @intCast(@divFloor(epoch_seconds, std.time.s_per_day));
     const day_secs: u32 = @intCast(@mod(epoch_seconds, std.time.s_per_day));
 
