@@ -192,7 +192,7 @@ pub const JetstreamClient = struct {
 
         log.info("connecting to wss://{s}{s}", .{ host, path });
 
-        var client = try websocket.Client.init(self.allocator, .{
+        var client = try websocket.Client.init(std.Options.debug_io, self.allocator, .{
             .host = host,
             .port = 443,
             .tls = true,
