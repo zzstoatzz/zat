@@ -18,7 +18,7 @@ const sync = @import("sync.zig");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const posix = std.posix;
-const libc = std.c;
+const Io = std.Io;
 const log = std.log.scoped(.zat);
 
 pub const CommitAction = sync.CommitAction;
@@ -410,12 +410,14 @@ fn encodeInfoPayload(allocator: Allocator, writer: anytype, info: InfoEvent) !vo
 }
 
 pub const FirehoseClient = struct {
+    io: Io,
     allocator: Allocator,
     options: Options,
     last_seq: ?i64 = null,
 
-    pub fn init(allocator: Allocator, options: Options) FirehoseClient {
+    pub fn init(io: Io, allocator: Allocator, options: Options) FirehoseClient {
         return .{
+            .io = io,
             .allocator = allocator,
             .options = options,
             .last_seq = if (options.cursor) |c| c else null,
@@ -429,7 +431,7 @@ pub const FirehoseClient = struct {
     /// optional: fn onError(*@TypeOf(handler), anyerror) void
     /// blocks forever — reconnects with exponential backoff on disconnect.
     /// rotates through hosts on each reconnect attempt.
-    pub fn subscribe(self: *FirehoseClient, handler: anytype) void {
+    pub fn subscribe(self: *FirehoseClient, handler: anytype) Io.Cancelable!void {
         var backoff: u64 = 1;
         var host_index: usize = 0;
         const max_backoff: u64 = 60;
@@ -456,7 +458,7 @@ pub const FirehoseClient = struct {
 
             prev_host_index = effective_index;
             host_index += 1;
-            _ = libc.nanosleep(&.{ .sec = @intCast(backoff), .nsec = 0 }, null);
+            try self.io.sleep(Io.Duration.fromSeconds(@intCast(backoff)), .awake);
             backoff = @min(backoff * 2, max_backoff);
         }
     }
@@ -473,7 +475,7 @@ pub const FirehoseClient = struct {
 
         log.info("connecting to wss://{s}{s}", .{ host, path });
 
-        var client = try websocket.Client.init(self.allocator, .{
+        var client = try websocket.Client.init(self.io, self.allocator, .{
             .host = host,
             .port = 443,
             .tls = true,

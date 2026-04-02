@@ -9,11 +9,11 @@ pub fn main() !void {
     std.debug.print("smoke test starting\n", .{});
 
     var handler = Handler{};
-    var client = zat.JetstreamClient.init(allocator, .{
+    var client = zat.JetstreamClient.init(std.Options.debug_io, allocator, .{
         .hosts = &.{"jetstream2.us-east.bsky.network"},
         .wanted_collections = &.{"app.bsky.feed.post"},
     });
-    client.subscribe(&handler);
+    try client.subscribe(&handler);
 }
 
 const Handler = struct {

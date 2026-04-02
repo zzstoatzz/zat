@@ -13,8 +13,8 @@ const sync = @import("sync.zig");
 const mem = std.mem;
 const json = std.json;
 const posix = std.posix;
-const libc = std.c;
 const Allocator = mem.Allocator;
+const Io = std.Io;
 const log = std.log.scoped(.zat);
 
 pub const CommitAction = sync.CommitAction;
@@ -131,12 +131,14 @@ pub fn parseEvent(allocator: Allocator, payload: []const u8) !Event {
 }
 
 pub const JetstreamClient = struct {
+    io: Io,
     allocator: Allocator,
     options: Options,
     last_time_us: ?i64 = null,
 
-    pub fn init(allocator: Allocator, options: Options) JetstreamClient {
+    pub fn init(io: Io, allocator: Allocator, options: Options) JetstreamClient {
         return .{
+            .io = io,
             .allocator = allocator,
             .options = options,
             .last_time_us = options.cursor,
@@ -151,7 +153,7 @@ pub const JetstreamClient = struct {
     /// optional: fn onConnect(*@TypeOf(handler), []const u8) void — called with host on connect
     /// blocks forever — reconnects with exponential backoff on disconnect.
     /// rotates through hosts on each reconnect attempt.
-    pub fn subscribe(self: *JetstreamClient, handler: anytype) void {
+    pub fn subscribe(self: *JetstreamClient, handler: anytype) Io.Cancelable!void {
         var backoff: u64 = 1;
         var host_index: usize = 0;
         const max_backoff: u64 = 60;
@@ -181,7 +183,7 @@ pub const JetstreamClient = struct {
 
             prev_host_index = effective_index;
             host_index += 1;
-            _ = libc.nanosleep(&.{ .sec = @intCast(backoff), .nsec = 0 }, null);
+            try self.io.sleep(Io.Duration.fromSeconds(@intCast(backoff)), .awake);
             backoff = @min(backoff * 2, max_backoff);
         }
     }
@@ -192,7 +194,7 @@ pub const JetstreamClient = struct {
 
         log.info("connecting to wss://{s}{s}", .{ host, path });
 
-        var client = try websocket.Client.init(std.Options.debug_io, self.allocator, .{
+        var client = try websocket.Client.init(self.io, self.allocator, .{
             .host = host,
             .port = 443,
             .tls = true,
@@ -462,7 +464,7 @@ test "Event.timeUs works for all variants" {
 }
 
 test "build subscribe path" {
-    var client = JetstreamClient.init(std.testing.allocator, .{
+    var client = JetstreamClient.init(std.Options.debug_io, std.testing.allocator, .{
         .wanted_collections = &.{"app.bsky.feed.post"},
     });
 
@@ -472,7 +474,7 @@ test "build subscribe path" {
 }
 
 test "build subscribe path with multiple params" {
-    var client = JetstreamClient.init(std.testing.allocator, .{
+    var client = JetstreamClient.init(std.Options.debug_io, std.testing.allocator, .{
         .wanted_collections = &.{ "app.bsky.feed.post", "app.bsky.feed.like" },
         .wanted_dids = &.{"did:plc:abc123"},
         .cursor = 1700000000000,
@@ -487,7 +489,7 @@ test "build subscribe path with multiple params" {
 }
 
 test "build subscribe path no params" {
-    var client = JetstreamClient.init(std.testing.allocator, .{});
+    var client = JetstreamClient.init(std.Options.debug_io, std.testing.allocator, .{});
 
     var buf: [2048]u8 = undefined;
     const path = try client.buildSubscribePath(&buf);
