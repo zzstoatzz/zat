@@ -443,7 +443,7 @@ pub fn verifyCommitDiff(
     // 9. invert each operation
     for (sorted_ops) |op| {
         mst.invertOp(&inverted, op) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
+            error.OutOfMemory, error.WriteFailed => return error.OutOfMemory,
             error.InversionMismatch => return error.InversionMismatch,
             error.PartialTree => return error.PartialTree,
         };
@@ -451,7 +451,7 @@ pub fn verifyCommitDiff(
 
     // 10. compute root CID of inverted tree
     const inverted_root = inverted.rootCid() catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
+        error.OutOfMemory, error.WriteFailed => return error.OutOfMemory,
         error.PartialTree => return error.PartialTree,
     };
 
