@@ -7,14 +7,13 @@
 
 const std = @import("std");
 const crypto = std.crypto;
+const Io = std.Io;
 const json = @import("../xrpc/json.zig");
 const multibase = @import("multibase.zig");
 const multicodec = @import("multicodec.zig");
 
-fn timestamp() i64 {
-    var tv: std.c.timeval = undefined;
-    _ = std.c.gettimeofday(&tv, null);
-    return tv.sec;
+fn timestamp(io: Io) i64 {
+    return @intCast(@divFloor(Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s));
 }
 
 /// JWT signing algorithm
@@ -145,14 +144,14 @@ pub const Jwt = struct {
     }
 
     /// check if the token is expired
-    pub fn isExpired(self: *const Jwt) bool {
-        const now = timestamp();
+    pub fn isExpired(self: *const Jwt, io: Io) bool {
+        const now = timestamp(io);
         return now > self.payload.exp;
     }
 
     /// check if the token is expired with clock skew tolerance (in seconds)
-    pub fn isExpiredWithSkew(self: *const Jwt, skew_seconds: i64) bool {
-        const now = timestamp();
+    pub fn isExpiredWithSkew(self: *const Jwt, io: Io, skew_seconds: i64) bool {
+        const now = timestamp(io);
         return now > (self.payload.exp + skew_seconds);
     }
 

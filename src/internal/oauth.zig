@@ -7,14 +7,13 @@
 
 const std = @import("std");
 const crypto = std.crypto;
+const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Keypair = @import("crypto/keypair.zig").Keypair;
 const jwt = @import("crypto/jwt.zig");
 
-fn timestamp() i64 {
-    var tv: std.c.timeval = undefined;
-    _ = std.c.gettimeofday(&tv, null);
-    return tv.sec;
+fn timestamp(io: Io) i64 {
+    return @intCast(@divFloor(Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s));
 }
 
 /// create a signed JWT from header and payload JSON strings.
@@ -55,7 +54,7 @@ pub fn createDpopProof(
     defer allocator.free(jti);
 
     const alg = @tagName(keypair.algorithm());
-    const now = timestamp();
+    const now = timestamp(io);
 
     // header: {"typ":"dpop+jwt","alg":"...","jwk":{...}}
     const header = try std.fmt.allocPrint(allocator,
@@ -99,7 +98,7 @@ pub fn createClientAssertion(
     defer allocator.free(kid);
 
     const alg = @tagName(keypair.algorithm());
-    const now = timestamp();
+    const now = timestamp(io);
 
     const header = try std.fmt.allocPrint(allocator,
         \\{{"typ":"JWT","alg":"{s}","kid":"{s}"}}
