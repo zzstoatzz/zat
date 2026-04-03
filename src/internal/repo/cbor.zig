@@ -494,6 +494,22 @@ fn dagCborKeyLessThan(_: void, a: Value.MapEntry, b: Value.MapEntry) bool {
     return std.mem.order(u8, a.key, b.key) == .lt;
 }
 
+/// write a short text string (< 24 bytes) as a single fused write.
+/// this is the hot path for map keys in AT Protocol records, where keys
+/// are always short ASCII strings. fusing header+payload into one writeAll
+/// halves the writer dispatch count.
+fn writeShortText(writer: anytype, text: []const u8) !void {
+    if (text.len < 24) {
+        var buf: [24]u8 = undefined;
+        buf[0] = 0x60 | @as(u8, @intCast(text.len));
+        @memcpy(buf[1..][0..text.len], text);
+        try writer.writeAll(buf[0 .. 1 + text.len]);
+    } else {
+        try writeArgument(writer, 3, text.len);
+        try writer.writeAll(text);
+    }
+}
+
 /// encode a Value to the given writer in DAG-CBOR format.
 /// allocator is needed for sorting map keys during encoding.
 pub fn encode(allocator: Allocator, writer: anytype, value: Value) !void {
@@ -508,10 +524,7 @@ pub fn encode(allocator: Allocator, writer: anytype, value: Value) !void {
             try writeArgument(writer, 2, b.len);
             try writer.writeAll(b);
         },
-        .text => |t| {
-            try writeArgument(writer, 3, t.len);
-            try writer.writeAll(t);
-        },
+        .text => |t| try writeShortText(writer, t),
         .array => |items| {
             try writeArgument(writer, 4, items.len);
             for (items) |item| {
@@ -521,11 +534,21 @@ pub fn encode(allocator: Allocator, writer: anytype, value: Value) !void {
         .map => |entries| {
             try writeArgument(writer, 5, entries.len);
             // DAG-CBOR: keys sorted by byte length, then lexicographically.
-            // fast path: skip allocation + sort when keys are already in order
-            // (common for decoded data and hand-constructed records).
+            // three paths: already sorted (common for decoded data), stack sort
+            // for small maps (≤16 entries, covers all AT Protocol records), or
+            // heap sort for rare large maps.
             if (keysAlreadySorted(entries)) {
                 for (entries) |entry| {
-                    try encode(allocator, writer, .{ .text = entry.key });
+                    try writeShortText(writer, entry.key);
+                    try encode(allocator, writer, entry.value);
+                }
+            } else if (entries.len <= 16) {
+                var buf: [16]Value.MapEntry = undefined;
+                const sorted = buf[0..entries.len];
+                @memcpy(sorted, entries);
+                std.mem.sort(Value.MapEntry, sorted, {}, dagCborKeyLessThan);
+                for (sorted) |entry| {
+                    try writeShortText(writer, entry.key);
                     try encode(allocator, writer, entry.value);
                 }
             } else {
@@ -533,7 +556,7 @@ pub fn encode(allocator: Allocator, writer: anytype, value: Value) !void {
                 defer allocator.free(sorted);
                 std.mem.sort(Value.MapEntry, sorted, {}, dagCborKeyLessThan);
                 for (sorted) |entry| {
-                    try encode(allocator, writer, .{ .text = entry.key });
+                    try writeShortText(writer, entry.key);
                     try encode(allocator, writer, entry.value);
                 }
             }
