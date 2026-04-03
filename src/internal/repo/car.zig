@@ -37,11 +37,13 @@ pub const CarError = error{
     BadBlockHash,
     BlocksTooLarge,
     TooManyBlocks,
+    BlockTooLarge,
 };
 
 /// match indigo's safety limits
 const max_blocks_size: usize = 2 * 1024 * 1024; // 2 MB
 const max_block_count: usize = 10_000;
+const max_block_size: usize = 1024 * 1024; // 1 MB per block (matches atmos)
 
 pub const ReadOptions = struct {
     /// verify that each block's content hashes to its CID.
@@ -75,16 +77,20 @@ pub fn readWithOptions(allocator: Allocator, data: []const u8, options: ReadOpti
     const header_bytes = data[pos..header_end];
     const header = cbor.decodeAll(allocator, header_bytes) catch return error.InvalidHeader;
 
-    // extract roots (array of CID links)
+    // validate version == 1
+    const version = header.getUint("version") orelse return error.InvalidHeader;
+    if (version != 1) return error.InvalidHeader;
+
+    // extract roots (array of CID links) — CAR v1 requires at least one root
     var roots: std.ArrayList(cbor.Cid) = .empty;
-    if (header.getArray("roots")) |root_values| {
-        for (root_values) |root_val| {
-            switch (root_val) {
-                .cid => |c| try roots.append(allocator, c),
-                else => {},
-            }
+    const root_values = header.getArray("roots") orelse return error.InvalidHeader;
+    for (root_values) |root_val| {
+        switch (root_val) {
+            .cid => |c| try roots.append(allocator, c),
+            else => {},
         }
     }
+    if (roots.items.len == 0) return error.InvalidHeader;
 
     pos = header_end;
 
@@ -97,6 +103,8 @@ pub fn readWithOptions(allocator: Allocator, data: []const u8, options: ReadOpti
         // total_len includes both CID and data
         const block_len = cbor.readUvarint(data, &pos) orelse return error.InvalidVarint;
         const block_len_usize = std.math.cast(usize, block_len) orelse return error.InvalidHeader;
+        if (block_len_usize == 0) return error.InvalidCid; // zero-length block has no CID
+        if (block_len_usize > max_block_size) return error.BlockTooLarge;
         const block_end = pos + block_len_usize;
         if (block_end > data.len) return error.UnexpectedEof;
 
@@ -255,60 +263,22 @@ test "read minimal CAR" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    // construct a minimal CAR v1 file:
-    // header: DAG-CBOR {"version": 1, "roots": []}
-    const header_cbor = [_]u8{
-        0xa2, // map(2)
-        0x65, 'r', 'o', 'o', 't', 's', 0x80, // "roots": []  (5 bytes, shorter)
-        0x67, 'v', 'e', 'r', 's', 'i', 'o', 'n', 0x01, // "version": 1  (7 bytes)
+    // create a block and compute its real CID
+    const block_content = try cbor.encodeAlloc(alloc, .{ .map = &.{
+        .{ .key = "text", .value = .{ .text = "hi" } },
+    } });
+    const block_cid = try cbor.Cid.forDagCbor(alloc, block_content);
+
+    // write a proper CAR via the writer, then read it back
+    const original = Car{
+        .roots = &.{block_cid},
+        .blocks = &.{.{ .cid_raw = block_cid.raw, .data = block_content }},
     };
+    const car_bytes = try writeAlloc(alloc, original);
+    const car_file = try read(alloc, car_bytes);
 
-    // one block: CIDv1 (dag-cbor, sha2-256) + CBOR data
-    const cid_prefix = [_]u8{
-        0x01, // version
-        0x71, // dag-cbor
-        0x12, // sha2-256
-        0x20, // 32-byte digest
-    };
-    const digest = [_]u8{0xaa} ** 32;
-    const block_content = [_]u8{
-        0xa1, // map(1)
-        0x64, 't', 'e', 'x', 't', // "text"
-        0x62, 'h', 'i', // "hi"
-    };
-
-    // assemble the CAR file
-    var car_buf: [256]u8 = undefined;
-    var car_pos: usize = 0;
-
-    // header length varint
-    car_buf[car_pos] = @intCast(header_cbor.len);
-    car_pos += 1;
-
-    // header
-    @memcpy(car_buf[car_pos..][0..header_cbor.len], &header_cbor);
-    car_pos += header_cbor.len;
-
-    // block length varint (CID + content)
-    const block_total_len = cid_prefix.len + digest.len + block_content.len;
-    car_buf[car_pos] = @intCast(block_total_len);
-    car_pos += 1;
-
-    // CID
-    @memcpy(car_buf[car_pos..][0..cid_prefix.len], &cid_prefix);
-    car_pos += cid_prefix.len;
-    @memcpy(car_buf[car_pos..][0..digest.len], &digest);
-    car_pos += digest.len;
-
-    // block content
-    @memcpy(car_buf[car_pos..][0..block_content.len], &block_content);
-    car_pos += block_content.len;
-
-    // this test uses a fake digest, so skip verification
-    const car_file = try readWithOptions(alloc, car_buf[0..car_pos], .{ .verify_block_hashes = false });
-
+    try std.testing.expectEqual(@as(usize, 1), car_file.roots.len);
     try std.testing.expectEqual(@as(usize, 1), car_file.blocks.len);
-    try std.testing.expectEqual(@as(usize, block_content.len), car_file.blocks[0].data.len);
 
     // decode the block content as CBOR
     const val = try cbor.decodeAll(alloc, car_file.blocks[0].data);

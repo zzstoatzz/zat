@@ -74,5 +74,6 @@ comptime {
         _ = @import("internal/testing/interop_tests.zig");
         _ = @import("internal/repo/repo_verifier.zig");
         _ = @import("internal/repo/cbor_test.zig");
+        _ = @import("internal/repo/car_test.zig");
     }
 }

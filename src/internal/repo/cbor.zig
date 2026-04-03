@@ -420,19 +420,19 @@ pub fn parseCid(raw: []const u8) Cid {
     return .{ .raw = raw };
 }
 
-/// read an unsigned varint (LEB128)
+/// read an unsigned varint (LEB128). rejects varints longer than 10 bytes.
 pub fn readUvarint(data: []const u8, pos: *usize) ?u64 {
     var result: u64 = 0;
     var shift: u6 = 0;
-    while (pos.* < data.len) {
+    for (0..10) |_| {
+        if (pos.* >= data.len) return null;
         const byte = data[pos.*];
         pos.* += 1;
         result |= @as(u64, byte & 0x7f) << shift;
         if (byte & 0x80 == 0) return result;
         shift +|= 7;
-        if (shift >= 64) return null;
     }
-    return null;
+    return null; // varint too long
 }
 
 // === encoder ===

@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const cbor = @import("cbor.zig");
+const car = @import("car.zig");
 const Value = cbor.Value;
 const Cid = cbor.Cid;
 
@@ -85,6 +86,10 @@ var encoded_cid_link: []const u8 = undefined;
 var bench_cid: Cid = undefined;
 var bench_arena: std.heap.ArenaAllocator = undefined;
 
+// CAR benchmark data
+var car_bytes: []const u8 = undefined;
+var car_5_blocks: []const u8 = undefined;
+
 fn initBenchData() void {
     bench_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const alloc = bench_arena.allocator();
@@ -94,6 +99,28 @@ fn initBenchData() void {
     encoded_uint = cbor.encodeAlloc(alloc, .{ .unsigned = 1_234_567_890 }) catch @panic("encode uint");
     bench_cid = Cid.forDagCbor(alloc, encoded_record) catch @panic("compute cid");
     encoded_cid_link = cbor.encodeAlloc(alloc, .{ .cid = bench_cid }) catch @panic("encode cid");
+
+    // build CAR test data: 1-block CAR
+    car_bytes = car.writeAlloc(alloc, .{
+        .roots = &.{bench_cid},
+        .blocks = &.{.{ .cid_raw = bench_cid.raw, .data = encoded_record }},
+    }) catch @panic("write car");
+
+    // 5-block CAR — each block has unique text to produce unique CIDs
+    const block_texts = [_][]const u8{ "block-0", "block-1", "block-2", "block-3", "block-4" };
+    var blocks5: [5]car.Block = undefined;
+    var cids5: [5]Cid = undefined;
+    for (&blocks5, &cids5, block_texts) |*b, *c, text| {
+        const rec = cbor.encodeAlloc(alloc, .{ .map = &.{
+            .{ .key = "text", .value = .{ .text = text } },
+        } }) catch @panic("encode block");
+        c.* = Cid.forDagCbor(alloc, rec) catch @panic("cid");
+        b.* = .{ .cid_raw = c.raw, .data = rec };
+    }
+    car_5_blocks = car.writeAlloc(alloc, .{
+        .roots = &.{cids5[0]},
+        .blocks = &blocks5,
+    }) catch @panic("write 5-block car");
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +358,56 @@ fn benchComputeCIDStack() void {
     std.mem.doNotOptimizeAway(cid_buf);
 }
 
+// --- CAR benchmarks ---
+
+fn benchCarRead1() void {
+    var scratch: [8192]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const parsed = car.readWithOptions(fba.allocator(), car_bytes, .{
+        .verify_block_hashes = true,
+    }) catch @panic("read car");
+    std.mem.doNotOptimizeAway(parsed);
+}
+
+fn benchCarRead1NoVerify() void {
+    var scratch: [8192]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const parsed = car.readWithOptions(fba.allocator(), car_bytes, .{
+        .verify_block_hashes = false,
+    }) catch @panic("read car");
+    std.mem.doNotOptimizeAway(parsed);
+}
+
+fn benchCarRead5() void {
+    var scratch: [32768]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const parsed = car.readWithOptions(fba.allocator(), car_5_blocks, .{
+        .verify_block_hashes = true,
+    }) catch @panic("read car");
+    std.mem.doNotOptimizeAway(parsed);
+}
+
+fn benchCarWrite1() void {
+    var out_buf: [2048]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out_buf);
+    var scratch: [2048]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    car.write(fba.allocator(), &w, .{
+        .roots = &.{bench_cid},
+        .blocks = &.{.{ .cid_raw = bench_cid.raw, .data = encoded_record }},
+    }) catch @panic("write car");
+    std.mem.doNotOptimizeAway(w.end);
+}
+
+fn benchCarRoundTrip1() void {
+    var scratch: [16384]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const alloc = fba.allocator();
+    const parsed = car.read(alloc, car_bytes) catch @panic("read");
+    const written = car.writeAlloc(alloc, parsed) catch @panic("write");
+    std.mem.doNotOptimizeAway(written);
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -373,6 +450,15 @@ pub fn main() void {
 
     std.debug.print("\ncomposite:\n", .{});
     bench("decode + key lookup (3 keys)", benchMapKeyLookup);
+
+    std.debug.print("\nCAR v1 ({d} bytes, 1 block):\n", .{car_bytes.len});
+    bench("read CAR (with hash verify)", benchCarRead1);
+    bench("read CAR (no verify)", benchCarRead1NoVerify);
+    bench("write CAR", benchCarWrite1);
+    bench("read + write round-trip", benchCarRoundTrip1);
+
+    std.debug.print("\nCAR v1 ({d} bytes, 5 blocks):\n", .{car_5_blocks.len});
+    bench("read CAR 5 blocks (verified)", benchCarRead5);
 
     std.debug.print("\ndiagnostic (cost breakdown):\n", .{});
     bench("UTF-8 validate (434 bytes)", benchUtf8Validate);
