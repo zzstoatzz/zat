@@ -853,6 +853,108 @@ pub fn peekTypeAt(data: []const u8, pos: usize) DecodeError!?[]const u8 {
     return null;
 }
 
+// === low-level write API ===
+
+/// Write CBOR initial byte + argument using shortest encoding.
+/// Returns new position after written bytes. Caller must ensure buf is large enough.
+pub fn writeArg(buf: []u8, pos: usize, major: u3, val: u64) usize {
+    const prefix: u8 = @as(u8, major) << 5;
+    if (val < 24) {
+        buf[pos] = prefix | @as(u8, @intCast(val));
+        return pos + 1;
+    } else if (val <= 0xff) {
+        buf[pos] = prefix | 24;
+        buf[pos + 1] = @intCast(val);
+        return pos + 2;
+    } else if (val <= 0xffff) {
+        buf[pos] = prefix | 25;
+        const v: u16 = @intCast(val);
+        buf[pos + 1] = @truncate(v >> 8);
+        buf[pos + 2] = @truncate(v);
+        return pos + 3;
+    } else if (val <= 0xffffffff) {
+        buf[pos] = prefix | 26;
+        const v: u32 = @intCast(val);
+        buf[pos + 1] = @truncate(v >> 24);
+        buf[pos + 2] = @truncate(v >> 16);
+        buf[pos + 3] = @truncate(v >> 8);
+        buf[pos + 4] = @truncate(v);
+        return pos + 5;
+    } else {
+        buf[pos] = prefix | 27;
+        buf[pos + 1] = @truncate(val >> 56);
+        buf[pos + 2] = @truncate(val >> 48);
+        buf[pos + 3] = @truncate(val >> 40);
+        buf[pos + 4] = @truncate(val >> 32);
+        buf[pos + 5] = @truncate(val >> 24);
+        buf[pos + 6] = @truncate(val >> 16);
+        buf[pos + 7] = @truncate(val >> 8);
+        buf[pos + 8] = @truncate(val);
+        return pos + 9;
+    }
+}
+
+/// Write CBOR text string header + payload.
+pub fn writeText(buf: []u8, pos: usize, text: []const u8) usize {
+    const p = writeArg(buf, pos, 3, text.len);
+    @memcpy(buf[p..][0..text.len], text);
+    return p + text.len;
+}
+
+/// Write CBOR byte string header + payload.
+pub fn writeBytes(buf: []u8, pos: usize, bytes: []const u8) usize {
+    const p = writeArg(buf, pos, 2, bytes.len);
+    @memcpy(buf[p..][0..bytes.len], bytes);
+    return p + bytes.len;
+}
+
+/// Write unsigned integer (major 0).
+pub fn writeUint(buf: []u8, pos: usize, val: u64) usize {
+    return writeArg(buf, pos, 0, val);
+}
+
+/// Write signed integer. Positive values use major 0, negative values use major 1.
+pub fn writeInt(buf: []u8, pos: usize, val: i64) usize {
+    if (val >= 0) {
+        return writeArg(buf, pos, 0, @intCast(val));
+    } else {
+        const raw: u64 = @intCast(-1 - val);
+        return writeArg(buf, pos, 1, raw);
+    }
+}
+
+/// Write map header (major 5).
+pub fn writeMapHeader(buf: []u8, pos: usize, count: usize) usize {
+    return writeArg(buf, pos, 5, count);
+}
+
+/// Write array header (major 4).
+pub fn writeArrayHeader(buf: []u8, pos: usize, count: usize) usize {
+    return writeArg(buf, pos, 4, count);
+}
+
+/// Write boolean: 0xf5 (true) or 0xf4 (false).
+pub fn writeBool(buf: []u8, pos: usize, val: bool) usize {
+    buf[pos] = if (val) 0xf5 else 0xf4;
+    return pos + 1;
+}
+
+/// Write null: 0xf6.
+pub fn writeNull(buf: []u8, pos: usize) usize {
+    buf[pos] = 0xf6;
+    return pos + 1;
+}
+
+/// Write tag(42) + byte string with 0x00 prefix + CID raw bytes.
+pub fn writeCidLink(buf: []u8, pos: usize, cid_raw: []const u8) usize {
+    var p = writeArg(buf, pos, 6, 42);
+    p = writeArg(buf, p, 2, 1 + cid_raw.len);
+    buf[p] = 0x00;
+    p += 1;
+    @memcpy(buf[p..][0..cid_raw.len], cid_raw);
+    return p + cid_raw.len;
+}
+
 // === tests ===
 
 test "decode unsigned integers" {
