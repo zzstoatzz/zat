@@ -76,15 +76,20 @@ const bench_record: Value = .{ .map = &.{
     .{ .key = "text", .value = .{ .text = "Hello, world! This is a test post with some content." } },
 } };
 
-const bench_text = "Hello, world! This is a test post with some content.";
+const bench_text_literal = "Hello, world! This is a test post with some content.";
 
-// pre-encoded data (initialized in main)
+// pre-encoded data (initialized at runtime in initBenchData so the compiler
+// cannot constant-fold through them — matches real production conditions
+// where inputs arrive from the network)
 var encoded_record: []const u8 = undefined;
 var encoded_text: []const u8 = undefined;
 var encoded_uint: []const u8 = undefined;
 var encoded_cid_link: []const u8 = undefined;
 var bench_cid: Cid = undefined;
 var bench_arena: std.heap.ArenaAllocator = undefined;
+// runtime-opaque text for write benchmarks (same content as bench_text_literal
+// but not visible to the optimizer as a comptime constant)
+var bench_text: []const u8 = undefined;
 
 // CAR benchmark data
 var car_bytes: []const u8 = undefined;
@@ -95,6 +100,7 @@ fn initBenchData() void {
     const alloc = bench_arena.allocator();
 
     encoded_record = cbor.encodeAlloc(alloc, bench_record) catch @panic("encode record");
+    bench_text = alloc.dupe(u8, bench_text_literal) catch @panic("dupe text");
     encoded_text = cbor.encodeAlloc(alloc, .{ .text = bench_text }) catch @panic("encode text");
     encoded_uint = cbor.encodeAlloc(alloc, .{ .unsigned = 1_234_567_890 }) catch @panic("encode uint");
     bench_cid = Cid.forDagCbor(alloc, encoded_record) catch @panic("compute cid");
@@ -346,19 +352,19 @@ fn benchDecodeLarge() void {
 fn benchWriteTextDirect() void {
     var buf: [128]u8 = undefined;
     const end = cbor.writeText(&buf, 0, bench_text);
-    std.mem.doNotOptimizeAway(end);
+    std.mem.doNotOptimizeAway(buf[0..end]);
 }
 
 fn benchWriteUintDirect() void {
     var buf: [16]u8 = undefined;
     const end = cbor.writeUint(&buf, 0, 1_234_567_890);
-    std.mem.doNotOptimizeAway(end);
+    std.mem.doNotOptimizeAway(buf[0..end]);
 }
 
 fn benchWriteCidLinkDirect() void {
     var buf: [128]u8 = undefined;
     const end = cbor.writeCidLink(&buf, 0, bench_cid.raw);
-    std.mem.doNotOptimizeAway(end);
+    std.mem.doNotOptimizeAway(buf[0..end]);
 }
 
 fn benchWriteRecordDirect() void {
@@ -368,7 +374,7 @@ fn benchWriteRecordDirect() void {
     p = cbor.writeMapHeader(&buf, p, 5);
     // keys in DAG-CBOR order: text(4), $type(5), langs(5), reply(5), createdAt(9)
     p = cbor.writeText(&buf, p, "text");
-    p = cbor.writeText(&buf, p, "Hello, world! This is a test post with some content.");
+    p = cbor.writeText(&buf, p, bench_text);
     p = cbor.writeText(&buf, p, "$type");
     p = cbor.writeText(&buf, p, "app.bsky.feed.post");
     p = cbor.writeText(&buf, p, "langs");
@@ -390,7 +396,7 @@ fn benchWriteRecordDirect() void {
     p = cbor.writeText(&buf, p, "at://did:plc:4nendwqrs754gt6qvgr56jmn/app.bsky.feed.post/3medg2qvcuc2c");
     p = cbor.writeText(&buf, p, "createdAt");
     p = cbor.writeText(&buf, p, "2024-01-15T12:00:00.000Z");
-    std.mem.doNotOptimizeAway(p);
+    std.mem.doNotOptimizeAway(buf[0..p]);
 }
 
 // --- low-level read (buffer-direct) ---
