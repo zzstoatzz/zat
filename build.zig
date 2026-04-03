@@ -77,6 +77,21 @@ pub fn build(b: *std.Build) void {
     const smoke_step = b.step("smoke", "run jetstream smoke test");
     smoke_step.dependOn(&run_smoke.step);
 
+    // CBOR codec benchmarks
+    const cbor_bench = b.addExecutable(.{
+        .name = "cbor-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/internal/repo/cbor_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(cbor_bench);
+
+    const run_bench = b.addRunArtifact(cbor_bench);
+    const bench_step = b.step("bench", "run CBOR codec benchmarks");
+    bench_step.dependOn(&run_bench.step);
+
     // publish-docs script (uses zat to publish docs to ATProto)
     const publish_docs = b.addExecutable(.{
         .name = "publish-docs",

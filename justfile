@@ -15,3 +15,7 @@ check:
 # run tests
 test:
     zig build test --summary all -freference-trace
+
+# run CBOR codec benchmarks
+bench:
+    zig build bench -Doptimize=ReleaseFast
