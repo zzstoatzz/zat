@@ -265,67 +265,71 @@ pub fn decodeAll(allocator: Allocator, data: []const u8) DecodeError!Value {
 
 fn decodeAt(allocator: Allocator, data: []const u8, pos: *usize, depth: usize) DecodeError!Value {
     if (pos.* >= data.len) return error.UnexpectedEof;
-
     const initial = data[pos.*];
-    pos.* += 1;
-
-    const major: MajorType = @enumFromInt(@as(u3, @truncate(initial >> 5)));
+    const major: u3 = @truncate(initial >> 5);
     const additional: u5 = @truncate(initial);
 
-    return switch (major) {
-        .unsigned => {
-            const val = try readArgument(data, pos, additional);
-            return .{ .unsigned = val };
-        },
-        .negative => {
-            const val = try readArgument(data, pos, additional);
+    // simple values (major 7) are handled without readArg since floats
+    // use additional 25/26/27 to mean float16/32/64, not integer arguments
+    if (major == 7) {
+        pos.* += 1;
+        return switch (additional) {
+            20 => .{ .boolean = false },
+            21 => .{ .boolean = true },
+            22 => .null,
+            25, 26, 27 => error.UnsupportedFloat, // DAG-CBOR forbids floats in AT Protocol
+            31 => error.IndefiniteLength, // break code — DAG-CBOR forbids indefinite lengths
+            else => error.UnsupportedSimpleValue,
+        };
+    }
+
+    const arg = try readArg(data, pos.*);
+    pos.* = arg.end;
+
+    return switch (@as(MajorType, @enumFromInt(major))) {
+        .unsigned => .{ .unsigned = arg.val },
+        .negative => blk: {
             // negative CBOR: value is -1 - val
-            if (val > std.math.maxInt(i64)) return error.Overflow;
-            return .{ .negative = -1 - @as(i64, @intCast(val)) };
+            if (arg.val > std.math.maxInt(i64)) return error.Overflow;
+            break :blk .{ .negative = -1 - @as(i64, @intCast(arg.val)) };
         },
-        .byte_string => {
-            const len = try readArgument(data, pos, additional);
-            const end = pos.* + @as(usize, @intCast(len));
+        .byte_string => blk: {
+            const end = pos.* + @as(usize, @intCast(arg.val));
             if (end > data.len) return error.UnexpectedEof;
             const bytes = data[pos.*..end];
             pos.* = end;
-            return .{ .bytes = bytes };
+            break :blk .{ .bytes = bytes };
         },
-        .text_string => {
-            const len = try readArgument(data, pos, additional);
-            const end = pos.* + @as(usize, @intCast(len));
+        .text_string => blk: {
+            const end = pos.* + @as(usize, @intCast(arg.val));
             if (end > data.len) return error.UnexpectedEof;
             const text = data[pos.*..end];
             if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
             pos.* = end;
-            return .{ .text = text };
+            break :blk .{ .text = text };
         },
-        .array => {
+        .array => blk: {
             if (depth >= max_depth) return error.MaxDepthExceeded;
-            const count = try readArgument(data, pos, additional);
             // sanity check: each element is at least 1 byte
-            if (count > data.len - pos.*) return error.UnexpectedEof;
-            const items = try allocator.alloc(Value, @intCast(count));
+            if (arg.val > data.len - pos.*) return error.UnexpectedEof;
+            const items = try allocator.alloc(Value, @intCast(arg.val));
             for (items) |*item| {
                 item.* = try decodeAt(allocator, data, pos, depth + 1);
             }
-            return .{ .array = items };
+            break :blk .{ .array = items };
         },
-        .map => {
+        .map => blk: {
             if (depth >= max_depth) return error.MaxDepthExceeded;
-            const count = try readArgument(data, pos, additional);
             // sanity check: each entry is at least 2 bytes (key + value)
-            if (count > (data.len - pos.*) / 2) return error.UnexpectedEof;
-            const entries = try allocator.alloc(Value.MapEntry, @intCast(count));
+            if (arg.val > (data.len - pos.*) / 2) return error.UnexpectedEof;
+            const entries = try allocator.alloc(Value.MapEntry, @intCast(arg.val));
             for (entries, 0..) |*entry, i| {
                 // DAG-CBOR: map keys must be text strings — inline read to avoid
                 // a full decodeAt + Value union construction per key
-                if (pos.* >= data.len) return error.UnexpectedEof;
-                const key_byte = data[pos.*];
-                pos.* += 1;
-                if (@as(u3, @truncate(key_byte >> 5)) != 3) return error.InvalidMapKey;
-                const key_len = try readArgument(data, pos, @truncate(key_byte));
-                const key_end = pos.* + @as(usize, @intCast(key_len));
+                const key_arg = try readArg(data, pos.*);
+                pos.* = key_arg.end;
+                if (key_arg.major != 3) return error.InvalidMapKey;
+                const key_end = pos.* + @as(usize, @intCast(key_arg.val));
                 if (key_end > data.len) return error.UnexpectedEof;
                 entry.key = data[pos.*..key_end];
                 if (!std.unicode.utf8ValidateSlice(entry.key)) return error.InvalidUtf8;
@@ -349,11 +353,10 @@ fn decodeAt(allocator: Allocator, data: []const u8, pos: *usize, depth: usize) D
 
                 entry.value = try decodeAt(allocator, data, pos, depth + 1);
             }
-            return .{ .map = entries };
+            break :blk .{ .map = entries };
         },
-        .tag => {
-            const tag_num = try readArgument(data, pos, additional);
-            if (tag_num != 42) return error.UnsupportedTag; // DAG-CBOR only allows tag 42 (CID)
+        .tag => blk: {
+            if (arg.val != 42) return error.UnsupportedTag; // DAG-CBOR only allows tag 42 (CID)
             // CID link — content is a byte string with 0x00 prefix
             const content = try decodeAt(allocator, data, pos, depth);
             const cid_bytes = switch (content) {
@@ -361,57 +364,9 @@ fn decodeAt(allocator: Allocator, data: []const u8, pos: *usize, depth: usize) D
                 else => return error.InvalidCid,
             };
             if (cid_bytes.len < 1 or cid_bytes[0] != 0x00) return error.InvalidCid;
-            return .{ .cid = .{ .raw = cid_bytes[1..] } }; // zero-cost: just reference the bytes
+            break :blk .{ .cid = .{ .raw = cid_bytes[1..] } }; // zero-cost: just reference the bytes
         },
-        .simple => {
-            return switch (additional) {
-                20 => .{ .boolean = false },
-                21 => .{ .boolean = true },
-                22 => .null,
-                25, 26, 27 => error.UnsupportedFloat, // DAG-CBOR forbids floats in AT Protocol
-                31 => error.IndefiniteLength, // break code — DAG-CBOR forbids indefinite lengths
-                else => error.UnsupportedSimpleValue,
-            };
-        },
-    };
-}
-
-/// read the argument value from additional info + following bytes.
-/// enforces DAG-CBOR shortest-form encoding: rejects values that could
-/// have been encoded with fewer bytes.
-fn readArgument(data: []const u8, pos: *usize, additional: u5) DecodeError!u64 {
-    return switch (additional) {
-        0...23 => @as(u64, additional),
-        24 => { // 1-byte
-            if (pos.* >= data.len) return error.UnexpectedEof;
-            const val = data[pos.*];
-            pos.* += 1;
-            if (val < 24) return error.NonMinimalEncoding;
-            return @as(u64, val);
-        },
-        25 => { // 2-byte big-endian
-            if (pos.* + 2 > data.len) return error.UnexpectedEof;
-            const val = std.mem.readInt(u16, data[pos.*..][0..2], .big);
-            pos.* += 2;
-            if (val <= 0xff) return error.NonMinimalEncoding;
-            return @as(u64, val);
-        },
-        26 => { // 4-byte big-endian
-            if (pos.* + 4 > data.len) return error.UnexpectedEof;
-            const val = std.mem.readInt(u32, data[pos.*..][0..4], .big);
-            pos.* += 4;
-            if (val <= 0xffff) return error.NonMinimalEncoding;
-            return @as(u64, val);
-        },
-        27 => { // 8-byte big-endian
-            if (pos.* + 8 > data.len) return error.UnexpectedEof;
-            const val = std.mem.readInt(u64, data[pos.*..][0..8], .big);
-            pos.* += 8;
-            if (val <= 0xffffffff) return error.NonMinimalEncoding;
-            return val;
-        },
-        28, 29, 30 => error.ReservedAdditionalInfo,
-        31 => error.IndefiniteLength,
+        .simple => unreachable, // handled above
     };
 }
 
