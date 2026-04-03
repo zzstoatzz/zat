@@ -241,6 +241,7 @@ pub const DecodeError = error{
     DuplicateMapKey,
     InvalidUtf8,
     MaxDepthExceeded,
+    WrongType,
 };
 
 /// maximum nesting depth for arrays/maps to prevent stack overflow
@@ -589,6 +590,61 @@ pub fn writeUvarint(writer: anytype, val: u64) !void {
         v >>= 7;
     }
     try writer.writeByte(@as(u8, @truncate(v)));
+}
+
+/// Result of reading a CBOR initial byte and its argument.
+pub const Arg = struct {
+    major: u3,
+    val: u64,
+    end: usize,
+};
+
+/// Read a CBOR initial byte at `pos`, parse the argument value from
+/// additional info + following bytes, and return the major type (high 3 bits),
+/// argument value, and position after the header.
+///
+/// Validates shortest-form encoding (DAG-CBOR requirement).
+/// This is the public, value-semantics equivalent of the internal `readArgument`.
+pub fn readArg(data: []const u8, pos: usize) DecodeError!Arg {
+    if (pos >= data.len) return error.UnexpectedEof;
+    const initial = data[pos];
+    const major: u3 = @truncate(initial >> 5);
+    const additional: u5 = @truncate(initial);
+    var cur = pos + 1;
+    const val: u64 = switch (additional) {
+        0...23 => @as(u64, additional),
+        24 => blk: { // 1-byte
+            if (cur >= data.len) return error.UnexpectedEof;
+            const v = data[cur];
+            cur += 1;
+            if (v < 24) return error.NonMinimalEncoding;
+            break :blk @as(u64, v);
+        },
+        25 => blk: { // 2-byte big-endian
+            if (cur + 2 > data.len) return error.UnexpectedEof;
+            const v = std.mem.readInt(u16, data[cur..][0..2], .big);
+            cur += 2;
+            if (v <= 0xff) return error.NonMinimalEncoding;
+            break :blk @as(u64, v);
+        },
+        26 => blk: { // 4-byte big-endian
+            if (cur + 4 > data.len) return error.UnexpectedEof;
+            const v = std.mem.readInt(u32, data[cur..][0..4], .big);
+            cur += 4;
+            if (v <= 0xffff) return error.NonMinimalEncoding;
+            break :blk @as(u64, v);
+        },
+        27 => blk: { // 8-byte big-endian
+            if (cur + 8 > data.len) return error.UnexpectedEof;
+            const v = std.mem.readInt(u64, data[cur..][0..8], .big);
+            cur += 8;
+            if (v <= 0xffffffff) return error.NonMinimalEncoding;
+            break :blk v;
+        },
+        28, 29, 30 => return error.ReservedAdditionalInfo,
+        31 => return error.IndefiniteLength,
+    };
+    return .{ .major = major, .val = val, .end = cur };
 }
 
 // === tests ===
