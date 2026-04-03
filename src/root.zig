@@ -78,5 +78,6 @@ comptime {
         _ = @import("internal/repo/cbor_write_test.zig");
         _ = @import("internal/repo/car_test.zig");
         _ = @import("internal/repo/cbor_rfc8949_test.zig");
+        _ = @import("internal/repo/mst_test.zig");
     }
 }
