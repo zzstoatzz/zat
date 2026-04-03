@@ -366,3 +366,137 @@ test "readCidLink: reject non-tag" {
     const data = [_]u8{ 0x43, 0x01, 0x02, 0x03 }; // major 2 (bytes), not a tag
     try std.testing.expectError(error.WrongType, readCidLink(&data, 0));
 }
+
+// ===========================================================================
+// skipValue
+// ===========================================================================
+
+const skipValue = cbor.skipValue;
+const peekType = cbor.peekType;
+const peekTypeAt = cbor.peekTypeAt;
+const encodeAlloc = cbor.encodeAlloc;
+const Value = cbor.Value;
+
+test "skipValue: unsigned integer (1 byte)" {
+    // 0x05 = major 0, value 5
+    const data = [_]u8{0x05};
+    const end = try skipValue(&data, 0);
+    try std.testing.expectEqual(@as(usize, 1), end);
+}
+
+test "skipValue: text string (header + payload)" {
+    // 0x65 = major 3, length 5 + "hello"
+    const data = [_]u8{ 0x65, 'h', 'e', 'l', 'l', 'o' };
+    const end = try skipValue(&data, 0);
+    try std.testing.expectEqual(@as(usize, 6), end);
+}
+
+test "skipValue: nested map {\"a\": [1, 2]}" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Build {"a": [1, 2]} using the encoder
+    const val = Value{ .map = &.{
+        .{ .key = "a", .value = .{ .array = &.{
+            .{ .unsigned = 1 },
+            .{ .unsigned = 2 },
+        } } },
+    } };
+    const encoded = try encodeAlloc(alloc, val);
+    const end = try skipValue(encoded, 0);
+    try std.testing.expectEqual(encoded.len, end);
+}
+
+test "skipValue: CID link (tag 42 + byte string)" {
+    // tag(42): 0xd8 0x2a
+    // bytes(37): 0x58 0x25 (37 = 1 prefix + 36 CID)
+    // 0x00 prefix + 36-byte CID
+    const cid_raw = [_]u8{ 0x01, 0x71, 0x12, 0x20 } ++ [_]u8{0xaa} ** 32;
+    const data = [_]u8{ 0xd8, 0x2a, 0x58, 0x25, 0x00 } ++ cid_raw;
+    const end = try skipValue(&data, 0);
+    try std.testing.expectEqual(data.len, end);
+}
+
+test "skipValue: first of two concatenated values" {
+    // Two values: unsigned 5 (0x05) followed by unsigned 10 (0x0a)
+    const data = [_]u8{ 0x05, 0x0a };
+    const end = try skipValue(&data, 0);
+    try std.testing.expectEqual(@as(usize, 1), end);
+    // The second value starts at position 1
+    try std.testing.expectEqual(@as(u8, 0x0a), data[end]);
+}
+
+test "skipValue: complex record (encoded map)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Encode a realistic map with multiple types
+    const val = Value{ .map = &.{
+        .{ .key = "$type", .value = .{ .text = "app.bsky.feed.post" } },
+        .{ .key = "createdAt", .value = .{ .text = "2024-01-01T00:00:00Z" } },
+        .{ .key = "text", .value = .{ .text = "hello world" } },
+    } };
+    const encoded = try encodeAlloc(alloc, val);
+    const end = try skipValue(encoded, 0);
+    try std.testing.expectEqual(encoded.len, end);
+}
+
+// ===========================================================================
+// peekType
+// ===========================================================================
+
+test "peekType: find $type when present" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const val = Value{ .map = &.{
+        .{ .key = "$type", .value = .{ .text = "app.bsky.feed.post" } },
+        .{ .key = "text", .value = .{ .text = "hello" } },
+    } };
+    const encoded = try encodeAlloc(alloc, val);
+    const result = try peekType(encoded);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("app.bsky.feed.post", result.?);
+}
+
+test "peekType: find $type when not first key (DAG-CBOR sort order)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // DAG-CBOR sorts by length then lex. Keys "ab" (2 bytes) sorts before
+    // "$type" (5 bytes), so "$type" won't be first.
+    const val = Value{ .map = &.{
+        .{ .key = "ab", .value = .{ .unsigned = 42 } },
+        .{ .key = "$type", .value = .{ .text = "app.bsky.graph.follow" } },
+        .{ .key = "zzzzzz", .value = .{ .boolean = true } },
+    } };
+    const encoded = try encodeAlloc(alloc, val);
+    const result = try peekType(encoded);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("app.bsky.graph.follow", result.?);
+}
+
+test "peekType: return null when no $type field" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const val = Value{ .map = &.{
+        .{ .key = "text", .value = .{ .text = "hello" } },
+        .{ .key = "count", .value = .{ .unsigned = 5 } },
+    } };
+    const encoded = try encodeAlloc(alloc, val);
+    const result = try peekType(encoded);
+    try std.testing.expect(result == null);
+}
+
+test "peekType: return null for non-map input" {
+    // An unsigned integer, not a map
+    const data = [_]u8{0x05};
+    const result = try peekType(&data);
+    try std.testing.expect(result == null);
+}

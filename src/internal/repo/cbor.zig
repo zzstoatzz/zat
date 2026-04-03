@@ -756,6 +756,103 @@ pub fn readCidLink(data: []const u8, pos: usize) DecodeError!SliceResult {
     return .{ .val = payload[1..], .end = bytes_result.end };
 }
 
+// ---------------------------------------------------------------------------
+// Streaming helpers — skip / peek without full decode
+// ---------------------------------------------------------------------------
+
+/// Skip one CBOR value at `pos` without decoding it. Returns the position
+/// after the skipped value. Iterative (not recursive) using a small stack
+/// for nested containers. Zero allocation.
+pub fn skipValue(data: []const u8, pos: usize) DecodeError!usize {
+    const max_stack = 32;
+    var stack: [max_stack]u64 = undefined;
+    var depth: usize = 0;
+    var cur = pos;
+
+    while (true) {
+        const arg = try readArg(data, cur);
+        cur = arg.end;
+
+        switch (arg.major) {
+            0, 1 => {
+                // integers: header only, nothing to skip after readArg
+            },
+            2, 3 => {
+                // byte string / text string: skip `val` bytes of payload
+                if (cur + arg.val > data.len) return error.UnexpectedEof;
+                cur += @intCast(arg.val);
+            },
+            4 => {
+                // array: push element count
+                if (arg.val > 0) {
+                    if (depth >= max_stack) return error.MaxDepthExceeded;
+                    stack[depth] = arg.val;
+                    depth += 1;
+                    continue; // don't decrement — we haven't consumed an element yet
+                }
+            },
+            5 => {
+                // map: push key+value count (2 per entry)
+                if (arg.val > 0) {
+                    if (depth >= max_stack) return error.MaxDepthExceeded;
+                    stack[depth] = arg.val * 2;
+                    depth += 1;
+                    continue;
+                }
+            },
+            6 => {
+                // tag: the tagged value follows immediately — loop to read it
+                // don't push anything, don't decrement
+                continue;
+            },
+            7 => {
+                // simple/float: header only
+            },
+        }
+
+        // After consuming a value, unwind the stack
+        while (depth > 0) {
+            stack[depth - 1] -= 1;
+            if (stack[depth - 1] > 0) break;
+            depth -= 1;
+        }
+
+        if (depth == 0) return cur;
+    }
+}
+
+/// Peek at the "$type" field in a DAG-CBOR map without full decode.
+/// Returns the type string (zero-copy slice) or null if not found.
+pub fn peekType(data: []const u8) DecodeError!?[]const u8 {
+    return peekTypeAt(data, 0);
+}
+
+/// Peek at the "$type" field starting from a given position.
+pub fn peekTypeAt(data: []const u8, pos: usize) DecodeError!?[]const u8 {
+    const map_header = try readArg(data, pos);
+    if (map_header.major != 5) return null;
+
+    var cur = map_header.end;
+    const count = map_header.val;
+
+    for (0..@as(usize, @intCast(count))) |_| {
+        // Read key — DAG-CBOR keys are always text strings
+        const key = readText(data, cur) catch return null;
+        cur = key.end;
+
+        if (std.mem.eql(u8, key.val, "$type")) {
+            // Read the value as text
+            const val = readText(data, cur) catch return null;
+            return val.val;
+        }
+
+        // Skip the value
+        cur = try skipValue(data, cur);
+    }
+
+    return null;
+}
+
 // === tests ===
 
 test "decode unsigned integers" {
