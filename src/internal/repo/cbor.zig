@@ -647,6 +647,115 @@ pub fn readArg(data: []const u8, pos: usize) DecodeError!Arg {
     return .{ .major = major, .val = val, .end = cur };
 }
 
+// ---------------------------------------------------------------------------
+// Type-specific readers — zero-copy, no allocator needed
+// ---------------------------------------------------------------------------
+
+pub const SliceResult = struct { val: []const u8, end: usize };
+pub const U64Result = struct { val: u64, end: usize };
+pub const I64Result = struct { val: i64, end: usize };
+pub const BoolResult = struct { val: bool, end: usize };
+
+/// Read a CBOR text string (major type 3) at `pos`.
+/// Validates UTF-8. Returns a zero-copy slice into `data`.
+pub fn readText(data: []const u8, pos: usize) DecodeError!SliceResult {
+    const arg = try readArg(data, pos);
+    if (arg.major != 3) return error.WrongType;
+    const len = arg.val;
+    if (arg.end + len > data.len) return error.UnexpectedEof;
+    const text = data[arg.end..][0..len];
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+    return .{ .val = text, .end = arg.end + len };
+}
+
+/// Read a CBOR byte string (major type 2) at `pos`.
+/// Returns a zero-copy slice into `data`.
+pub fn readBytes(data: []const u8, pos: usize) DecodeError!SliceResult {
+    const arg = try readArg(data, pos);
+    if (arg.major != 2) return error.WrongType;
+    const len = arg.val;
+    if (arg.end + len > data.len) return error.UnexpectedEof;
+    return .{ .val = data[arg.end..][0..len], .end = arg.end + len };
+}
+
+/// Read a CBOR unsigned integer (major type 0) at `pos`.
+pub fn readUint(data: []const u8, pos: usize) DecodeError!U64Result {
+    const arg = try readArg(data, pos);
+    if (arg.major != 0) return error.WrongType;
+    return .{ .val = arg.val, .end = arg.end };
+}
+
+/// Read a CBOR integer (major type 0 or 1) at `pos`.
+/// Major 0 = positive, major 1 = negative (-1 - val).
+/// Returns error.Overflow if a positive value exceeds maxInt(i64).
+pub fn readInt(data: []const u8, pos: usize) DecodeError!I64Result {
+    const arg = try readArg(data, pos);
+    switch (arg.major) {
+        0 => {
+            if (arg.val > @as(u64, @intCast(std.math.maxInt(i64)))) return error.Overflow;
+            return .{ .val = @intCast(arg.val), .end = arg.end };
+        },
+        1 => {
+            // CBOR negative: -1 - val
+            // val can be 0..2^64-1, result is -1..-2^64
+            // i64 can hold down to -2^63, so max raw val is 2^63 - 1
+            if (arg.val > @as(u64, @intCast(std.math.maxInt(i64)))) return error.Overflow;
+            return .{ .val = -1 - @as(i64, @intCast(arg.val)), .end = arg.end };
+        },
+        else => return error.WrongType,
+    }
+}
+
+/// Read a CBOR boolean at `pos`.
+/// 0xf4 = false, 0xf5 = true.
+pub fn readBool(data: []const u8, pos: usize) DecodeError!BoolResult {
+    if (pos >= data.len) return error.UnexpectedEof;
+    return switch (data[pos]) {
+        0xf4 => .{ .val = false, .end = pos + 1 },
+        0xf5 => .{ .val = true, .end = pos + 1 },
+        else => error.WrongType,
+    };
+}
+
+/// Read a CBOR null at `pos`.
+/// 0xf6 = null. Returns position after the null byte.
+pub fn readNull(data: []const u8, pos: usize) DecodeError!usize {
+    if (pos >= data.len) return error.UnexpectedEof;
+    if (data[pos] != 0xf6) return error.WrongType;
+    return pos + 1;
+}
+
+/// Read a CBOR map header (major type 5) at `pos`.
+/// Returns the entry count.
+pub fn readMapHeader(data: []const u8, pos: usize) DecodeError!U64Result {
+    const arg = try readArg(data, pos);
+    if (arg.major != 5) return error.WrongType;
+    return .{ .val = arg.val, .end = arg.end };
+}
+
+/// Read a CBOR array header (major type 4) at `pos`.
+/// Returns the element count.
+pub fn readArrayHeader(data: []const u8, pos: usize) DecodeError!U64Result {
+    const arg = try readArg(data, pos);
+    if (arg.major != 4) return error.WrongType;
+    return .{ .val = arg.val, .end = arg.end };
+}
+
+/// Read a DAG-CBOR CID link at `pos`.
+/// Expects tag(42) followed by a byte string with a 0x00 identity multibase prefix.
+/// Returns the raw CID bytes (after the 0x00 prefix) as a zero-copy slice.
+pub fn readCidLink(data: []const u8, pos: usize) DecodeError!SliceResult {
+    // Read the tag header — must be tag(42)
+    const tag_arg = try readArg(data, pos);
+    if (tag_arg.major != 6 or tag_arg.val != 42) return error.WrongType;
+    // Read the inner byte string
+    const bytes_result = try readBytes(data, tag_arg.end);
+    const payload = bytes_result.val;
+    // Must have at least the 0x00 prefix
+    if (payload.len == 0 or payload[0] != 0x00) return error.InvalidCid;
+    return .{ .val = payload[1..], .end = bytes_result.end };
+}
+
 // === tests ===
 
 test "decode unsigned integers" {
