@@ -73,5 +73,6 @@ comptime {
     if (@import("builtin").is_test) {
         _ = @import("internal/testing/interop_tests.zig");
         _ = @import("internal/repo/repo_verifier.zig");
+        _ = @import("internal/repo/cbor_test.zig");
     }
 }

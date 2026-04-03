@@ -259,8 +259,8 @@ test "read minimal CAR" {
     // header: DAG-CBOR {"version": 1, "roots": []}
     const header_cbor = [_]u8{
         0xa2, // map(2)
-        0x67, 'v', 'e', 'r', 's', 'i', 'o', 'n', 0x01, // "version": 1
-        0x65, 'r', 'o', 'o', 't', 's', 0x80, // "roots": []
+        0x65, 'r', 'o', 'o', 't', 's', 0x80, // "roots": []  (5 bytes, shorter)
+        0x67, 'v', 'e', 'r', 's', 'i', 'o', 'n', 0x01, // "version": 1  (7 bytes)
     };
 
     // one block: CIDv1 (dag-cbor, sha2-256) + CBOR data

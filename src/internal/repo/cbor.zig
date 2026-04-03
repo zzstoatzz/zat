@@ -228,23 +228,35 @@ pub const DecodeError = error{
     ReservedAdditionalInfo,
     Overflow,
     OutOfMemory,
+    NonMinimalEncoding,
+    TrailingBytes,
+    UnsupportedTag,
+    UnsortedMapKeys,
+    DuplicateMapKey,
+    InvalidUtf8,
+    MaxDepthExceeded,
 };
+
+/// maximum nesting depth for arrays/maps to prevent stack overflow
+pub const max_depth: usize = 128;
 
 /// decode a single CBOR value from the front of `data`.
 /// returns the value and the number of bytes consumed.
 pub fn decode(allocator: Allocator, data: []const u8) DecodeError!struct { value: Value, consumed: usize } {
     var pos: usize = 0;
-    const value = try decodeAt(allocator, data, &pos);
+    const value = try decodeAt(allocator, data, &pos, 0);
     return .{ .value = value, .consumed = pos };
 }
 
-/// decode all bytes as a single CBOR value
+/// decode all bytes as a single CBOR value, rejecting trailing bytes
 pub fn decodeAll(allocator: Allocator, data: []const u8) DecodeError!Value {
     var pos: usize = 0;
-    return try decodeAt(allocator, data, &pos);
+    const value = try decodeAt(allocator, data, &pos, 0);
+    if (pos != data.len) return error.TrailingBytes;
+    return value;
 }
 
-fn decodeAt(allocator: Allocator, data: []const u8, pos: *usize) DecodeError!Value {
+fn decodeAt(allocator: Allocator, data: []const u8, pos: *usize, depth: usize) DecodeError!Value {
     if (pos.* >= data.len) return error.UnexpectedEof;
 
     const initial = data[pos.*];
@@ -277,21 +289,28 @@ fn decodeAt(allocator: Allocator, data: []const u8, pos: *usize) DecodeError!Val
             const end = pos.* + @as(usize, @intCast(len));
             if (end > data.len) return error.UnexpectedEof;
             const text = data[pos.*..end];
+            if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
             pos.* = end;
             return .{ .text = text };
         },
         .array => {
+            if (depth >= max_depth) return error.MaxDepthExceeded;
             const count = try readArgument(data, pos, additional);
+            // sanity check: each element is at least 1 byte
+            if (count > data.len - pos.*) return error.UnexpectedEof;
             const items = try allocator.alloc(Value, @intCast(count));
             for (items) |*item| {
-                item.* = try decodeAt(allocator, data, pos);
+                item.* = try decodeAt(allocator, data, pos, depth + 1);
             }
             return .{ .array = items };
         },
         .map => {
+            if (depth >= max_depth) return error.MaxDepthExceeded;
             const count = try readArgument(data, pos, additional);
+            // sanity check: each entry is at least 2 bytes (key + value)
+            if (count > (data.len - pos.*) / 2) return error.UnexpectedEof;
             const entries = try allocator.alloc(Value.MapEntry, @intCast(count));
-            for (entries) |*entry| {
+            for (entries, 0..) |*entry, i| {
                 // DAG-CBOR: map keys must be text strings — inline read to avoid
                 // a full decodeAt + Value union construction per key
                 if (pos.* >= data.len) return error.UnexpectedEof;
@@ -302,27 +321,40 @@ fn decodeAt(allocator: Allocator, data: []const u8, pos: *usize) DecodeError!Val
                 const key_end = pos.* + @as(usize, @intCast(key_len));
                 if (key_end > data.len) return error.UnexpectedEof;
                 entry.key = data[pos.*..key_end];
+                if (!std.unicode.utf8ValidateSlice(entry.key)) return error.InvalidUtf8;
                 pos.* = key_end;
-                entry.value = try decodeAt(allocator, data, pos);
+
+                // DAG-CBOR: keys must be sorted (shorter first, then lex) and unique
+                if (i > 0) {
+                    const prev = entries[i - 1].key;
+                    if (prev.len < entry.key.len) {
+                        // ok — shorter key first
+                    } else if (prev.len == entry.key.len) {
+                        switch (std.mem.order(u8, prev, entry.key)) {
+                            .lt => {}, // ok — lex order
+                            .eq => return error.DuplicateMapKey,
+                            .gt => return error.UnsortedMapKeys,
+                        }
+                    } else {
+                        return error.UnsortedMapKeys;
+                    }
+                }
+
+                entry.value = try decodeAt(allocator, data, pos, depth + 1);
             }
             return .{ .map = entries };
         },
         .tag => {
             const tag_num = try readArgument(data, pos, additional);
-            if (tag_num == 42) {
-                // CID link — content is a byte string with 0x00 prefix
-                const content = try decodeAt(allocator, data, pos);
-                const cid_bytes = switch (content) {
-                    .bytes => |b| b,
-                    else => return error.InvalidCid,
-                };
-                if (cid_bytes.len < 1 or cid_bytes[0] != 0x00) return error.InvalidCid;
-                return .{ .cid = .{ .raw = cid_bytes[1..] } }; // zero-cost: just reference the bytes
-            }
-            // generic tag — allocate content on heap
-            const content_ptr = try allocator.create(Value);
-            content_ptr.* = try decodeAt(allocator, data, pos);
-            return .{ .tag = .{ .number = tag_num, .content = content_ptr } };
+            if (tag_num != 42) return error.UnsupportedTag; // DAG-CBOR only allows tag 42 (CID)
+            // CID link — content is a byte string with 0x00 prefix
+            const content = try decodeAt(allocator, data, pos, depth);
+            const cid_bytes = switch (content) {
+                .bytes => |b| b,
+                else => return error.InvalidCid,
+            };
+            if (cid_bytes.len < 1 or cid_bytes[0] != 0x00) return error.InvalidCid;
+            return .{ .cid = .{ .raw = cid_bytes[1..] } }; // zero-cost: just reference the bytes
         },
         .simple => {
             return switch (additional) {
@@ -337,7 +369,9 @@ fn decodeAt(allocator: Allocator, data: []const u8, pos: *usize) DecodeError!Val
     };
 }
 
-/// read the argument value from additional info + following bytes
+/// read the argument value from additional info + following bytes.
+/// enforces DAG-CBOR shortest-form encoding: rejects values that could
+/// have been encoded with fewer bytes.
 fn readArgument(data: []const u8, pos: *usize, additional: u5) DecodeError!u64 {
     return switch (additional) {
         0...23 => @as(u64, additional),
@@ -345,24 +379,28 @@ fn readArgument(data: []const u8, pos: *usize, additional: u5) DecodeError!u64 {
             if (pos.* >= data.len) return error.UnexpectedEof;
             const val = data[pos.*];
             pos.* += 1;
+            if (val < 24) return error.NonMinimalEncoding;
             return @as(u64, val);
         },
         25 => { // 2-byte big-endian
             if (pos.* + 2 > data.len) return error.UnexpectedEof;
             const val = std.mem.readInt(u16, data[pos.*..][0..2], .big);
             pos.* += 2;
+            if (val <= 0xff) return error.NonMinimalEncoding;
             return @as(u64, val);
         },
         26 => { // 4-byte big-endian
             if (pos.* + 4 > data.len) return error.UnexpectedEof;
             const val = std.mem.readInt(u32, data[pos.*..][0..4], .big);
             pos.* += 4;
+            if (val <= 0xffff) return error.NonMinimalEncoding;
             return @as(u64, val);
         },
         27 => { // 8-byte big-endian
             if (pos.* + 8 > data.len) return error.UnexpectedEof;
             const val = std.mem.readInt(u64, data[pos.*..][0..8], .big);
             pos.* += 8;
+            if (val <= 0xffffffff) return error.NonMinimalEncoding;
             return val;
         },
         28, 29, 30 => error.ReservedAdditionalInfo,
@@ -601,11 +639,11 @@ test "decode nested map" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    // {"op": 1, "t": "#commit"}
+    // {"t": "#commit", "op": 1} — sorted by key length (1 < 2)
     const result = try decode(alloc, &.{
         0xa2, // map(2)
-        0x62, 'o', 'p', 0x01, // "op": 1
         0x61, 't', 0x67, '#', 'c', 'o', 'm', 'm', 'i', 't', // "t": "#commit"
+        0x62, 'o', 'p', 0x01, // "op": 1
     });
     const val = result.value;
     try std.testing.expectEqual(@as(u64, 1), val.get("op").?.unsigned);
@@ -643,9 +681,9 @@ test "Value helper methods" {
 
     const result = try decode(alloc, &.{
         0xa3, // map(3)
-        0x64, 'n', 'a', 'm', 'e', 0x65, 'a', 'l', 'i', 'c', 'e', // "name": "alice"
-        0x63, 'a', 'g', 'e', 0x18, 30, // "age": 30
-        0x66, 'a', 'c', 't', 'i', 'v', 'e', 0xf5, // "active": true
+        0x63, 'a', 'g', 'e', 0x18, 30, // "age": 30  (3 bytes, shortest)
+        0x64, 'n', 'a', 'm', 'e', 0x65, 'a', 'l', 'i', 'c', 'e', // "name": "alice" (4 bytes)
+        0x66, 'a', 'c', 't', 'i', 'v', 'e', 0xf5, // "active": true (6 bytes)
     });
     const val = result.value;
     try std.testing.expectEqualStrings("alice", val.getString("name").?);
