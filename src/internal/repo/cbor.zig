@@ -34,7 +34,6 @@ pub const Value = union(enum) {
     text: []const u8,
     array: []const Value,
     map: []const MapEntry,
-    tag: Tag,
     boolean: bool,
     null,
     cid: Cid,
@@ -42,11 +41,6 @@ pub const Value = union(enum) {
     pub const MapEntry = struct {
         key: []const u8, // DAG-CBOR: keys are always text strings
         value: Value,
-    };
-
-    pub const Tag = struct {
-        number: u64,
-        content: *const Value,
     };
 
     /// look up a key in a map value
@@ -114,6 +108,15 @@ pub const Value = union(enum) {
         const v = self.get(key) orelse return null;
         return switch (v) {
             .array => |a| a,
+            else => null,
+        };
+    }
+
+    /// get a CID from a map by key
+    pub fn getCid(self: Value, key: []const u8) ?Cid {
+        const v = self.get(key) orelse return null;
+        return switch (v) {
+            .cid => |c| c,
             else => null,
         };
     }
@@ -409,7 +412,7 @@ fn readArgument(data: []const u8, pos: *usize, additional: u5) DecodeError!u64 {
 }
 
 /// wrap raw CID bytes (after removing the 0x00 multibase prefix) into a Cid.
-/// validates the structure is parseable but stores only the raw bytes.
+/// does not validate the CID structure — call version()/codec()/digest() to parse lazily.
 pub fn parseCid(raw: []const u8) Cid {
     return .{ .raw = raw };
 }
@@ -505,10 +508,6 @@ pub fn encode(allocator: Allocator, writer: anytype, value: Value) !void {
                 try encode(allocator, writer, .{ .text = entry.key });
                 try encode(allocator, writer, entry.value);
             }
-        },
-        .tag => |t| {
-            try writeArgument(writer, 6, t.number);
-            try encode(allocator, writer, t.content.*);
         },
         .boolean => |b| try writer.writeByte(if (b) @as(u8, 0xf5) else @as(u8, 0xf4)),
         .null => try writer.writeByte(0xf6),

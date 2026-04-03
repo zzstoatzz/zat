@@ -493,6 +493,7 @@ pub const Mst = struct {
         var prev_key: []const u8 = "";
         for (data.entries) |entry_data| {
             // reconstruct full key
+            if (entry_data.prefix_len > prev_key.len) return error.InvalidMstNode;
             const full_key = try allocator.alloc(u8, entry_data.prefix_len + entry_data.key_suffix.len);
             if (entry_data.prefix_len > 0) {
                 @memcpy(full_key[0..entry_data.prefix_len], prev_key[0..entry_data.prefix_len]);

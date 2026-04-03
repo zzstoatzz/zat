@@ -1051,3 +1051,130 @@ test "reject huge text string claim" {
         0x00, // just one byte
     }));
 }
+
+// === Cid method edge cases ===
+
+test "Cid.version returns null for empty raw" {
+    const cid = Cid{ .raw = &.{} };
+    try std.testing.expect(cid.version() == null);
+    try std.testing.expect(cid.codec() == null);
+    try std.testing.expect(cid.hashFn() == null);
+    try std.testing.expect(cid.digest() == null);
+}
+
+test "Cid.version returns null for single byte" {
+    const cid = Cid{ .raw = &.{0x01} };
+    try std.testing.expect(cid.version() == null);
+}
+
+test "Cid.digest returns null for truncated CIDv0" {
+    // CIDv0 starts with 0x12 0x20 but needs 34 bytes total
+    const cid = Cid{ .raw = &.{ 0x12, 0x20, 0xaa, 0xbb } }; // only 4 bytes, need 34
+    try std.testing.expect(cid.version().? == 0); // version parses ok
+    try std.testing.expect(cid.digest() == null); // but digest is truncated
+}
+
+test "Cid.digest returns correct slice for valid CIDv1" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const cid = try Cid.forDagCbor(arena.allocator(), "test");
+    const d = cid.digest().?;
+    try std.testing.expectEqual(@as(usize, 32), d.len);
+    // verify it's actually SHA-256 of "test"
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    var expected: [32]u8 = undefined;
+    Sha256.hash("test", &expected, .{});
+    try std.testing.expectEqualSlices(u8, &expected, d);
+}
+
+// === readUvarint edge cases ===
+
+test "readUvarint returns null on empty input" {
+    var pos: usize = 0;
+    try std.testing.expect(cbor.readUvarint(&.{}, &pos) == null);
+}
+
+test "readUvarint returns null on truncated continuation" {
+    // 0x80 = continuation bit set, needs more bytes
+    var pos: usize = 0;
+    try std.testing.expect(cbor.readUvarint(&.{0x80}, &pos) == null);
+}
+
+test "readUvarint decodes max single byte (127)" {
+    var pos: usize = 0;
+    try std.testing.expectEqual(@as(u64, 127), cbor.readUvarint(&.{0x7f}, &pos).?);
+    try std.testing.expectEqual(@as(usize, 1), pos);
+}
+
+test "readUvarint decodes multi-byte value" {
+    // 128 = 0x80 0x01
+    var pos: usize = 0;
+    try std.testing.expectEqual(@as(u64, 128), cbor.readUvarint(&.{ 0x80, 0x01 }, &pos).?);
+    try std.testing.expectEqual(@as(usize, 2), pos);
+}
+
+// === Value getter edge cases ===
+
+test "getUint returns null for negative value" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const val: Value = .{ .map = &.{
+        .{ .key = "n", .value = .{ .negative = -5 } },
+    } };
+    // -5 can't be represented as u64
+    try std.testing.expect(val.getUint("n") == null);
+}
+
+test "getInt returns null for u64 > max i64" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const val: Value = .{ .map = &.{
+        .{ .key = "n", .value = .{ .unsigned = std.math.maxInt(u64) } },
+    } };
+    // max u64 can't be represented as i64
+    try std.testing.expect(val.getInt("n") == null);
+}
+
+test "getCid returns CID for cid value" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cid = try Cid.forDagCbor(alloc, "data");
+    const val: Value = .{ .map = &.{
+        .{ .key = "link", .value = .{ .cid = cid } },
+    } };
+
+    const got = val.getCid("link").?;
+    try std.testing.expectEqualSlices(u8, cid.raw, got.raw);
+}
+
+test "getCid returns null for non-cid value" {
+    const val: Value = .{ .map = &.{
+        .{ .key = "x", .value = .{ .unsigned = 42 } },
+    } };
+    try std.testing.expect(val.getCid("x") == null);
+}
+
+test "get returns null for non-map value" {
+    const val: Value = .{ .unsigned = 42 };
+    try std.testing.expect(val.get("anything") == null);
+    try std.testing.expect(val.getString("anything") == null);
+    try std.testing.expect(val.getInt("anything") == null);
+}
+
+// === negative integer encode round-trip at min i64 ===
+
+test "round-trip encode min i64" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const min_i64: i64 = std.math.minInt(i64);
+    const encoded = try cbor.encodeAlloc(alloc, .{ .negative = min_i64 });
+    const decoded = try cbor.decodeAll(alloc, encoded);
+    try std.testing.expectEqual(min_i64, decoded.negative);
+}
