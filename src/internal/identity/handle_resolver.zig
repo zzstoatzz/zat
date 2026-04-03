@@ -168,10 +168,8 @@ test "resolve handle (http) - integration" {
 
     // resolve a known handle that has .well-known/atproto-did
     const handle = Handle.parse("jay.bsky.social") orelse return error.InvalidHandle;
-    const did = resolver.resolveHttp(handle) catch |err| {
-        // network errors are ok in CI without network access
-        std.debug.print("network error (expected in some CI): {}\n", .{err});
-        return;
+    const did = resolver.resolveHttp(handle) catch {
+        return; // network error, expected in CI
     };
 
     // should be a valid did:plc
@@ -187,10 +185,8 @@ test "resolve handle (dns over http) - integration" {
     defer resolver.deinit();
 
     const handle = Handle.parse("seiso.moe") orelse return error.InvalidHandle;
-    const did = resolver.resolveDns(handle) catch |err| {
-        // network errors are ok in CI without network access
-        std.debug.print("network error (expected in some CI): {}\n", .{err});
-        return;
+    const did = resolver.resolveDns(handle) catch {
+        return; // network error, expected in CI
     };
 
     // should be a valid DID
@@ -206,10 +202,8 @@ test "resolve handle - integration" {
     defer resolver.deinit();
 
     const handle = Handle.parse("jay.bsky.social") orelse return error.InvalidHandle;
-    const did = resolver.resolve(handle) catch |err| {
-        // network errors are ok in CI without network access
-        std.debug.print("network error (expected in some CI): {}\n", .{err});
-        return;
+    const did = resolver.resolve(handle) catch {
+        return; // network error, expected in CI
     };
 
     // should be a valid DID

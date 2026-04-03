@@ -117,10 +117,8 @@ test "resolve did:plc - integration" {
     defer resolver.deinit();
 
     const did = Did.parse("did:plc:z72i7hdynmk6r22z27h6tvur").?;
-    var doc = resolver.resolve(did) catch |err| {
-        // network errors are ok in CI, but compilation must succeed
-        std.debug.print("network error (expected in CI): {}\n", .{err});
-        return;
+    var doc = resolver.resolve(did) catch {
+        return; // network error, expected in CI
     };
     defer doc.deinit();
 
@@ -135,9 +133,8 @@ test "resolve did:plc - leak check (no arena)" {
     defer resolver.deinit();
 
     const did = Did.parse("did:plc:z72i7hdynmk6r22z27h6tvur").?;
-    var doc = resolver.resolve(did) catch |err| {
-        std.debug.print("network error (expected in CI): {}\n", .{err});
-        return;
+    var doc = resolver.resolve(did) catch {
+        return; // network error, expected in CI
     };
     defer doc.deinit();
 

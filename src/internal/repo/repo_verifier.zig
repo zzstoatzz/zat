@@ -476,14 +476,12 @@ test "verify repo - zzstoatzz.io" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const result = verifyRepo(std.Options.debug_io, arena.allocator(), "zzstoatzz.io") catch |err| {
-        std.debug.print("network error (expected in CI): {}\n", .{err});
-        return;
+    const result = verifyRepo(std.Options.debug_io, arena.allocator(), "zzstoatzz.io") catch {
+        return; // network error, expected in CI
     };
 
     try std.testing.expectEqualStrings("did:plc:xbtmt2zjwlrfegqvch7fboei", result.did);
     try std.testing.expect(result.record_count > 0);
-    std.debug.print("verified zzstoatzz.io: {d} records, rev={s}\n", .{ result.record_count, result.commit_rev });
 }
 
 test "verifyCommitDiff: build tree, serialize partial CAR, verify inversion" {
