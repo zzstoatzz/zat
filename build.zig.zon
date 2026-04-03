@@ -2,7 +2,7 @@
     .name = .zat,
     .version = "0.3.0-alpha.15",
     .fingerprint = 0x8da9db57ee82fbe4,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.16.0-dev.3070+b22eb176b",
     .dependencies = .{
         .websocket = .{
             .url = "https://github.com/zzstoatzz/websocket.zig/archive/ac3df25.tar.gz",

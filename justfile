@@ -14,4 +14,4 @@ check:
 
 # run tests
 test:
-    zig build test
+    zig build test --summary all -freference-trace
