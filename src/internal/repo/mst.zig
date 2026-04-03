@@ -172,7 +172,8 @@ pub const Mst = struct {
     fn findKey(maybe_node: ?*Node, layer: u32, key: []const u8, height: u32) ?cbor.Cid {
         const node = maybe_node orelse return null;
 
-        if (height == layer) {
+        if (height >= layer) {
+            // key belongs at this layer or above — scan entries
             for (node.entries.items) |entry| {
                 const cmp = std.mem.order(u8, key, entry.key);
                 if (cmp == .eq) return entry.value;
@@ -182,6 +183,7 @@ pub const Mst = struct {
         }
 
         // height < layer: recurse into the subtree gap containing key
+        if (layer == 0) return null; // can't go deeper
         for (node.entries.items, 0..) |entry, i| {
             if (std.mem.order(u8, key, entry.key) == .lt) {
                 const child = if (i == 0) node.left else node.entries.items[i - 1].right;
@@ -234,7 +236,7 @@ pub const Mst = struct {
     fn deleteFromNode(self: *Mst, node: *Node, layer: u32, key: []const u8) !?cbor.Cid {
         const height = keyHeight(key);
 
-        if (height == layer) {
+        if (height >= layer) {
             // find and remove the entry
             for (node.entries.items, 0..) |entry, i| {
                 if (std.mem.eql(u8, entry.key, key)) {
@@ -259,6 +261,7 @@ pub const Mst = struct {
         }
 
         // height < layer: recurse into the appropriate gap
+        if (layer == 0) return null; // can't go deeper
         if (node.entries.items.len == 0) {
             switch (node.left) {
                 .node => |left| return try self.deleteFromNode(left, layer - 1, key),

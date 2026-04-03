@@ -156,16 +156,12 @@ test "100 keys: all retrievable after insertion" {
     }
 }
 
-// TODO: this test exposes an integer overflow bug in MST tree rebalancing
-// after deletions. The tree.get() call panics after removing keys.
-// Needs investigation in the delete/rebalance path of mst.zig.
-test "insert 10 keys then remove every other" {
-    if (true) return error.SkipZigTest; // skip until MST delete bug is fixed
+test "insert 50 keys then remove every other" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    const n = 10;
+    const n = 50;
     var tree = Mst.init(a);
     var key_bufs: [n][64]u8 = undefined;
     var keys: [n][]const u8 = undefined;
