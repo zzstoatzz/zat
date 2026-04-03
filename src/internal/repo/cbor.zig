@@ -294,14 +294,16 @@ fn decodeAt(allocator: Allocator, data: []const u8, pos: *usize, depth: usize) D
             break :blk .{ .negative = -1 - @as(i64, @intCast(arg.val)) };
         },
         .byte_string => blk: {
-            const end = pos.* + @as(usize, @intCast(arg.val));
+            const len = std.math.cast(usize, arg.val) orelse return error.UnexpectedEof;
+            const end = std.math.add(usize, pos.*, len) catch return error.UnexpectedEof;
             if (end > data.len) return error.UnexpectedEof;
             const bytes = data[pos.*..end];
             pos.* = end;
             break :blk .{ .bytes = bytes };
         },
         .text_string => blk: {
-            const end = pos.* + @as(usize, @intCast(arg.val));
+            const len = std.math.cast(usize, arg.val) orelse return error.UnexpectedEof;
+            const end = std.math.add(usize, pos.*, len) catch return error.UnexpectedEof;
             if (end > data.len) return error.UnexpectedEof;
             const text = data[pos.*..end];
             if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
@@ -329,7 +331,8 @@ fn decodeAt(allocator: Allocator, data: []const u8, pos: *usize, depth: usize) D
                 const key_arg = try readArg(data, pos.*);
                 pos.* = key_arg.end;
                 if (key_arg.major != 3) return error.InvalidMapKey;
-                const key_end = pos.* + @as(usize, @intCast(key_arg.val));
+                const key_len = std.math.cast(usize, key_arg.val) orelse return error.UnexpectedEof;
+                const key_end = std.math.add(usize, pos.*, key_len) catch return error.UnexpectedEof;
                 if (key_end > data.len) return error.UnexpectedEof;
                 entry.key = data[pos.*..key_end];
                 if (!std.unicode.utf8ValidateSlice(entry.key)) return error.InvalidUtf8;
@@ -616,11 +619,12 @@ pub const BoolResult = struct { val: bool, end: usize };
 pub fn readText(data: []const u8, pos: usize) DecodeError!SliceResult {
     const arg = try readArg(data, pos);
     if (arg.major != 3) return error.WrongType;
-    const len = arg.val;
-    if (arg.end + len > data.len) return error.UnexpectedEof;
-    const text = data[arg.end..][0..len];
+    const len = std.math.cast(usize, arg.val) orelse return error.UnexpectedEof;
+    const end = std.math.add(usize, arg.end, len) catch return error.UnexpectedEof;
+    if (end > data.len) return error.UnexpectedEof;
+    const text = data[arg.end..end];
     if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
-    return .{ .val = text, .end = arg.end + len };
+    return .{ .val = text, .end = end };
 }
 
 /// Read a CBOR byte string (major type 2) at `pos`.
@@ -628,9 +632,10 @@ pub fn readText(data: []const u8, pos: usize) DecodeError!SliceResult {
 pub fn readBytes(data: []const u8, pos: usize) DecodeError!SliceResult {
     const arg = try readArg(data, pos);
     if (arg.major != 2) return error.WrongType;
-    const len = arg.val;
-    if (arg.end + len > data.len) return error.UnexpectedEof;
-    return .{ .val = data[arg.end..][0..len], .end = arg.end + len };
+    const len = std.math.cast(usize, arg.val) orelse return error.UnexpectedEof;
+    const end = std.math.add(usize, arg.end, len) catch return error.UnexpectedEof;
+    if (end > data.len) return error.UnexpectedEof;
+    return .{ .val = data[arg.end..end], .end = end };
 }
 
 /// Read a CBOR unsigned integer (major type 0) at `pos`.
@@ -734,8 +739,9 @@ pub fn skipValue(data: []const u8, pos: usize) DecodeError!usize {
             },
             2, 3 => {
                 // byte string / text string: skip `val` bytes of payload
-                if (cur + arg.val > data.len) return error.UnexpectedEof;
-                cur += @intCast(arg.val);
+                const len = std.math.cast(usize, arg.val) orelse return error.UnexpectedEof;
+                cur = std.math.add(usize, cur, len) catch return error.UnexpectedEof;
+                if (cur > data.len) return error.UnexpectedEof;
             },
             4 => {
                 // array: push element count
