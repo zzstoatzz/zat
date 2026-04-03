@@ -341,6 +341,85 @@ fn benchDecodeLarge() void {
     std.mem.doNotOptimizeAway(val);
 }
 
+// --- low-level write (buffer-direct) ---
+
+fn benchWriteTextDirect() void {
+    var buf: [128]u8 = undefined;
+    const end = cbor.writeText(&buf, 0, bench_text);
+    std.mem.doNotOptimizeAway(end);
+}
+
+fn benchWriteUintDirect() void {
+    var buf: [16]u8 = undefined;
+    const end = cbor.writeUint(&buf, 0, 1_234_567_890);
+    std.mem.doNotOptimizeAway(end);
+}
+
+fn benchWriteCidLinkDirect() void {
+    var buf: [128]u8 = undefined;
+    const end = cbor.writeCidLink(&buf, 0, bench_cid.raw);
+    std.mem.doNotOptimizeAway(end);
+}
+
+fn benchWriteRecordDirect() void {
+    // manually write the bench record using low-level API (simulates generated code)
+    var buf: [1024]u8 = undefined;
+    var p: usize = 0;
+    p = cbor.writeMapHeader(&buf, p, 5);
+    // keys in DAG-CBOR order: text(4), $type(5), langs(5), reply(5), createdAt(9)
+    p = cbor.writeText(&buf, p, "text");
+    p = cbor.writeText(&buf, p, "Hello, world! This is a test post with some content.");
+    p = cbor.writeText(&buf, p, "$type");
+    p = cbor.writeText(&buf, p, "app.bsky.feed.post");
+    p = cbor.writeText(&buf, p, "langs");
+    p = cbor.writeArrayHeader(&buf, p, 1);
+    p = cbor.writeText(&buf, p, "en");
+    p = cbor.writeText(&buf, p, "reply");
+    p = cbor.writeMapHeader(&buf, p, 2);
+    p = cbor.writeText(&buf, p, "parent");
+    p = cbor.writeMapHeader(&buf, p, 2);
+    p = cbor.writeText(&buf, p, "cid");
+    p = cbor.writeText(&buf, p, "bafyreib3pwrff2yadznophzf4hcvtyoctwzcujvz7x4pngk2isicz7yszq");
+    p = cbor.writeText(&buf, p, "uri");
+    p = cbor.writeText(&buf, p, "at://did:plc:4nendwqrs754gt6qvgr56jmn/app.bsky.feed.post/3medg2qvcuc2c");
+    p = cbor.writeText(&buf, p, "root");
+    p = cbor.writeMapHeader(&buf, p, 2);
+    p = cbor.writeText(&buf, p, "cid");
+    p = cbor.writeText(&buf, p, "bafyreib3pwrff2yadznophzf4hcvtyoctwzcujvz7x4pngk2isicz7yszq");
+    p = cbor.writeText(&buf, p, "uri");
+    p = cbor.writeText(&buf, p, "at://did:plc:4nendwqrs754gt6qvgr56jmn/app.bsky.feed.post/3medg2qvcuc2c");
+    p = cbor.writeText(&buf, p, "createdAt");
+    p = cbor.writeText(&buf, p, "2024-01-15T12:00:00.000Z");
+    std.mem.doNotOptimizeAway(p);
+}
+
+// --- low-level read (buffer-direct) ---
+
+fn benchReadTextDirect() void {
+    const r = cbor.readText(encoded_text, 0) catch @panic("readText");
+    std.mem.doNotOptimizeAway(r);
+}
+
+fn benchReadUintDirect() void {
+    const r = cbor.readUint(encoded_uint, 0) catch @panic("readUint");
+    std.mem.doNotOptimizeAway(r);
+}
+
+fn benchReadCidLinkDirect() void {
+    const r = cbor.readCidLink(encoded_cid_link, 0) catch @panic("readCidLink");
+    std.mem.doNotOptimizeAway(r);
+}
+
+fn benchSkipValue() void {
+    const end = cbor.skipValue(encoded_record, 0) catch @panic("skipValue");
+    std.mem.doNotOptimizeAway(end);
+}
+
+fn benchPeekType() void {
+    const typ = cbor.peekType(encoded_record) catch @panic("peekType");
+    std.mem.doNotOptimizeAway(typ);
+}
+
 // --- CID: stack vs heap allocation ---
 
 fn benchComputeCIDStack() void {
@@ -459,6 +538,19 @@ pub fn main() void {
 
     std.debug.print("\nCAR v1 ({d} bytes, 5 blocks):\n", .{car_5_blocks.len});
     bench("read CAR 5 blocks (verified)", benchCarRead5);
+
+    std.debug.print("\nlow-level write (buffer-direct):\n", .{});
+    bench("writeText (54 bytes)", benchWriteTextDirect);
+    bench("writeUint (1234567890)", benchWriteUintDirect);
+    bench("writeCidLink", benchWriteCidLinkDirect);
+    bench("writeRecord (manual, 434 bytes)", benchWriteRecordDirect);
+
+    std.debug.print("\nlow-level read (buffer-direct):\n", .{});
+    bench("readText (54 bytes)", benchReadTextDirect);
+    bench("readUint (1234567890)", benchReadUintDirect);
+    bench("readCidLink", benchReadCidLinkDirect);
+    bench("skipValue (434-byte record)", benchSkipValue);
+    bench("peekType (434-byte record)", benchPeekType);
 
     std.debug.print("\ndiagnostic (cost breakdown):\n", .{});
     bench("UTF-8 validate (434 bytes)", benchUtf8Validate);
