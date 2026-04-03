@@ -469,11 +469,9 @@ pub const Mst = struct {
 
         const root_node = try loadNodeFromData(allocator, repo_car, root_node_data);
 
-        // root layer = key height of first entry
-        var key_buf: [512]u8 = undefined;
-        const first = root_node_data.entries[0];
-        @memcpy(key_buf[0..first.key_suffix.len], first.key_suffix);
-        const root_layer = keyHeight(key_buf[0..first.key_suffix.len]);
+        // root layer = key height of first entry (root entry has prefix_len=0,
+        // so key_suffix IS the full key — no need to copy)
+        const root_layer = keyHeight(root_node_data.entries[0].key_suffix);
 
         return .{
             .allocator = allocator,

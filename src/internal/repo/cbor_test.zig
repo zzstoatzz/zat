@@ -1168,6 +1168,49 @@ test "get returns null for non-map value" {
 
 // === negative integer encode round-trip at min i64 ===
 
+// === readUvarint 10th byte overflow rejection ===
+
+test "readUvarint rejects 10th byte with value > 1" {
+    // 9 continuation bytes (0x80) + 10th byte with value 2 (bit 1 set, would overflow u64)
+    const data = [_]u8{0x80} ** 9 ++ [_]u8{0x02};
+    var pos: usize = 0;
+    try std.testing.expect(cbor.readUvarint(&data, &pos) == null);
+}
+
+test "readUvarint accepts 10th byte with value 1 (max u64)" {
+    // 9 continuation bytes (0xff = 0x7f data + continuation) + 10th byte 0x01
+    // This encodes 2^63 + (lower 63 bits all set) = max u64
+    const data = [_]u8{0xff} ** 9 ++ [_]u8{0x01};
+    var pos: usize = 0;
+    const val = cbor.readUvarint(&data, &pos);
+    try std.testing.expect(val != null);
+    try std.testing.expectEqual(std.math.maxInt(u64), val.?);
+}
+
+// === CID minimum size ===
+
+test "reject tag 42 with only 0x00 prefix (empty CID)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // tag(42) + bytes([0x00]) — prefix present but no actual CID bytes
+    try std.testing.expectError(error.InvalidCid, cbor.decode(arena.allocator(), &.{
+        0xd8, 0x2a, // tag(42)
+        0x41, 0x00, // bytes(1) with just the 0x00 prefix
+    }));
+}
+
+test "reject tag 42 with only prefix + 1 byte (too short for CID)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // tag(42) + bytes([0x00, 0x01]) — only 1 CID byte, need at least version + codec
+    try std.testing.expectError(error.InvalidCid, cbor.decode(arena.allocator(), &.{
+        0xd8, 0x2a, // tag(42)
+        0x42, 0x00, 0x01, // bytes(2) — prefix + 1 byte
+    }));
+}
+
+// === negative integer encode round-trip at min i64 ===
+
 test "round-trip encode min i64" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

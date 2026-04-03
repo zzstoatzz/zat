@@ -366,7 +366,9 @@ fn decodeAt(allocator: Allocator, data: []const u8, pos: *usize, depth: usize) D
                 .bytes => |b| b,
                 else => return error.InvalidCid,
             };
-            if (cid_bytes.len < 1 or cid_bytes[0] != 0x00) return error.InvalidCid;
+            // CID byte string must have 0x00 identity multibase prefix + at least
+            // version byte + codec byte (minimum 3 bytes total)
+            if (cid_bytes.len < 3 or cid_bytes[0] != 0x00) return error.InvalidCid;
             break :blk .{ .cid = .{ .raw = cid_bytes[1..] } }; // zero-cost: just reference the bytes
         },
         .simple => unreachable, // handled above
@@ -379,17 +381,20 @@ pub fn parseCid(raw: []const u8) Cid {
     return .{ .raw = raw };
 }
 
-/// read an unsigned varint (LEB128). rejects varints longer than 10 bytes.
+/// read an unsigned varint (LEB128). rejects varints longer than 10 bytes
+/// and rejects overflow (10th byte must have value <= 1).
 pub fn readUvarint(data: []const u8, pos: *usize) ?u64 {
     var result: u64 = 0;
-    var shift: u6 = 0;
-    for (0..10) |_| {
+    var shift: u7 = 0;
+    for (0..10) |i| {
         if (pos.* >= data.len) return null;
         const byte = data[pos.*];
         pos.* += 1;
-        result |= @as(u64, byte & 0x7f) << shift;
+        // 10th byte (i=9, shift=63): only bit 0 can fit in u64
+        if (i == 9 and byte > 1) return null;
+        result |= @as(u64, byte & 0x7f) << @as(u6, @intCast(shift));
         if (byte & 0x80 == 0) return result;
-        shift +|= 7;
+        shift += 7;
     }
     return null; // varint too long
 }
@@ -711,8 +716,8 @@ pub fn readCidLink(data: []const u8, pos: usize) DecodeError!SliceResult {
     // Read the inner byte string
     const bytes_result = try readBytes(data, tag_arg.end);
     const payload = bytes_result.val;
-    // Must have at least the 0x00 prefix
-    if (payload.len == 0 or payload[0] != 0x00) return error.InvalidCid;
+    // Must have 0x00 prefix + at least version byte + codec byte (min 3 bytes)
+    if (payload.len < 3 or payload[0] != 0x00) return error.InvalidCid;
     return .{ .val = payload[1..], .end = bytes_result.end };
 }
 
@@ -756,7 +761,7 @@ pub fn skipValue(data: []const u8, pos: usize) DecodeError!usize {
                 // map: push key+value count (2 per entry)
                 if (arg.val > 0) {
                     if (depth >= max_stack) return error.MaxDepthExceeded;
-                    stack[depth] = arg.val * 2;
+                    stack[depth] = std.math.mul(u64, arg.val, 2) catch return error.Overflow;
                     depth += 1;
                     continue;
                 }
@@ -796,7 +801,8 @@ pub fn peekTypeAt(data: []const u8, pos: usize) DecodeError!?[]const u8 {
     var cur = map_header.end;
     const count = map_header.val;
 
-    for (0..@as(usize, @intCast(count))) |_| {
+    const safe_count = std.math.cast(usize, count) orelse return null;
+    for (0..safe_count) |_| {
         // Read key — DAG-CBOR keys are always text strings
         const key = readText(data, cur) catch return null;
         cur = key.end;

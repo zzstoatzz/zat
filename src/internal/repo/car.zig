@@ -87,7 +87,7 @@ pub fn readWithOptions(allocator: Allocator, data: []const u8, options: ReadOpti
     for (root_values) |root_val| {
         switch (root_val) {
             .cid => |c| try roots.append(allocator, c),
-            else => {},
+            else => return error.InvalidHeader, // roots must all be CID links
         }
     }
     if (roots.items.len == 0) return error.InvalidHeader;
