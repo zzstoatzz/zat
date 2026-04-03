@@ -236,12 +236,108 @@ fn benchReadUvarint() void {
     std.mem.doNotOptimizeAway(val);
 }
 
+// --- diagnostic: isolate encode costs ---
+
+fn benchEncodeRecordNoSort() void {
+    // encode with keys already in DAG-CBOR order (no sort needed)
+    // bench_record keys are already sorted, so the sort is a no-op,
+    // but we still pay for allocator.dupe + allocator.free per map.
+    // this measures the sorting overhead vs raw encoding.
+    var scratch: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    var out_buf: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out_buf);
+    cbor.encode(fba.allocator(), &w, bench_record) catch @panic("encode");
+    std.mem.doNotOptimizeAway(w.end);
+}
+
+fn benchDecodeRecordNoValidation() void {
+    // decode without UTF-8 validation or key order checks
+    // (not possible with current API — this measures the same as benchUnmarshal
+    // to show the overhead of validation is included)
+    var scratch: [8192]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const val = cbor.decodeAll(fba.allocator(), encoded_record) catch @panic("decode");
+    std.mem.doNotOptimizeAway(val);
+}
+
+// --- diagnostic: UTF-8 validation cost ---
+
+fn benchUtf8Validate() void {
+    // just the UTF-8 validation on the encoded record's text content
+    // the record has ~300 bytes of text across all string fields
+    std.mem.doNotOptimizeAway(std.unicode.utf8ValidateSlice(encoded_record));
+}
+
+// --- diagnostic: SHA-256 only ---
+
+fn benchSha256() void {
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    var hash: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(encoded_record, &hash, .{});
+    std.mem.doNotOptimizeAway(hash);
+}
+
+// --- larger payloads ---
+
+var encoded_record_10x: []const u8 = undefined;
+
+fn initLargePayload() void {
+    const alloc = bench_arena.allocator();
+    // build a 10-element array of the bench record
+    var items: [10]Value = undefined;
+    for (&items) |*item| {
+        item.* = bench_record;
+    }
+    const large: Value = .{ .array = &items };
+    encoded_record_10x = cbor.encodeAlloc(alloc, large) catch @panic("encode 10x");
+}
+
+fn benchEncodeLarge() void {
+    var scratch: [65536]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    var items: [10]Value = undefined;
+    for (&items) |*item| {
+        item.* = bench_record;
+    }
+    const large: Value = .{ .array = &items };
+    var out_buf: [8192]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out_buf);
+    cbor.encode(fba.allocator(), &w, large) catch @panic("encode");
+    std.mem.doNotOptimizeAway(w.end);
+}
+
+fn benchDecodeLarge() void {
+    var scratch: [65536]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const val = cbor.decodeAll(fba.allocator(), encoded_record_10x) catch @panic("decode");
+    std.mem.doNotOptimizeAway(val);
+}
+
+// --- CID: stack vs heap allocation ---
+
+fn benchComputeCIDStack() void {
+    // compute CID writing to a stack buffer (no allocator)
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    var hash: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(encoded_record, &hash, .{});
+    // manually build CID bytes on stack: version(1) + codec(0x71) + hash_fn(0x12) + len(0x20) + hash
+    var cid_buf: [36]u8 = undefined;
+    cid_buf[0] = 0x01;
+    cid_buf[1] = 0x71;
+    cid_buf[2] = 0x12;
+    cid_buf[3] = 0x20;
+    @memcpy(cid_buf[4..36], &hash);
+    std.mem.doNotOptimizeAway(cid_buf);
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
 pub fn main() void {
     initBenchData();
+    initLargePayload();
     defer bench_arena.deinit();
 
     std.debug.print("\nDAG-CBOR benchmarks (record: {d} bytes encoded)\n", .{encoded_record.len});
@@ -255,6 +351,8 @@ pub fn main() void {
 
     std.debug.print("\nCID operations:\n", .{});
     bench("compute CID (SHA-256)", benchComputeCID);
+    bench("compute CID (stack, no alloc)", benchComputeCIDStack);
+    bench("SHA-256 only (434 bytes)", benchSha256);
     bench("encode + compute CID", benchEncodeAndCID);
 
     std.debug.print("\ntext string:\n", .{});
@@ -275,6 +373,13 @@ pub fn main() void {
 
     std.debug.print("\ncomposite:\n", .{});
     bench("decode + key lookup (3 keys)", benchMapKeyLookup);
+
+    std.debug.print("\ndiagnostic (cost breakdown):\n", .{});
+    bench("UTF-8 validate (434 bytes)", benchUtf8Validate);
+
+    std.debug.print("\nscaling (10x array = {d} bytes):\n", .{encoded_record_10x.len});
+    bench("encode 10x records", benchEncodeLarge);
+    bench("decode 10x records", benchDecodeLarge);
 
     std.debug.print("\n", .{});
 }

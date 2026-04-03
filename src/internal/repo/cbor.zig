@@ -204,15 +204,18 @@ pub const Cid = struct {
         var hash: [Sha256.digest_length]u8 = undefined;
         Sha256.hash(data, &hash, .{});
 
-        var aw: std.Io.Writer.Allocating = .init(allocator);
-        errdefer aw.deinit();
-        try writeUvarint(&aw.writer, ver);
-        try writeUvarint(&aw.writer, cod);
-        try writeUvarint(&aw.writer, hash_fn_code);
-        try writeUvarint(&aw.writer, Sha256.digest_length);
-        try aw.writer.writeAll(&hash);
+        // build CID on the stack then copy to allocator — avoids dynamic writer
+        // overhead. max varint size is 10 bytes × 4 fields + 32 byte hash = 72 bytes.
+        var buf: [72]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        writeUvarint(&w, ver) catch unreachable;
+        writeUvarint(&w, cod) catch unreachable;
+        writeUvarint(&w, hash_fn_code) catch unreachable;
+        writeUvarint(&w, Sha256.digest_length) catch unreachable;
+        w.writeAll(&hash) catch unreachable;
 
-        return .{ .raw = try aw.toOwnedSlice() };
+        const raw = try allocator.dupe(u8, w.buffered());
+        return .{ .raw = raw };
     }
 
     /// serialize this CID to raw bytes (version varint + codec varint + multihash)
@@ -438,34 +441,51 @@ pub const EncodeError = error{
     OutOfMemory,
 };
 
-/// write the CBOR initial byte + argument using shortest encoding (DAG-CBOR requirement)
+/// write the CBOR initial byte + argument using shortest encoding (DAG-CBOR requirement).
+/// batches all bytes into a single writeAll call to minimize writer dispatch overhead.
 fn writeArgument(writer: anytype, major: u3, val: u64) !void {
     const prefix: u8 = @as(u8, major) << 5;
     if (val < 24) {
-        try writer.writeByte(prefix | @as(u8, @intCast(val)));
+        try writer.writeAll(&.{prefix | @as(u8, @intCast(val))});
     } else if (val <= 0xff) {
-        try writer.writeByte(prefix | 24);
-        try writer.writeByte(@as(u8, @intCast(val)));
+        try writer.writeAll(&.{ prefix | 24, @as(u8, @intCast(val)) });
     } else if (val <= 0xffff) {
-        try writer.writeByte(prefix | 25);
         const v: u16 = @intCast(val);
-        try writer.writeAll(&[2]u8{ @truncate(v >> 8), @truncate(v) });
+        try writer.writeAll(&.{ prefix | 25, @truncate(v >> 8), @truncate(v) });
     } else if (val <= 0xffffffff) {
-        try writer.writeByte(prefix | 26);
         const v: u32 = @intCast(val);
-        try writer.writeAll(&[4]u8{
-            @truncate(v >> 24), @truncate(v >> 16),
-            @truncate(v >> 8),  @truncate(v),
+        try writer.writeAll(&.{
+            prefix | 26,
+            @truncate(v >> 24),
+            @truncate(v >> 16),
+            @truncate(v >> 8),
+            @truncate(v),
         });
     } else {
-        try writer.writeByte(prefix | 27);
-        try writer.writeAll(&[8]u8{
-            @truncate(val >> 56), @truncate(val >> 48),
-            @truncate(val >> 40), @truncate(val >> 32),
-            @truncate(val >> 24), @truncate(val >> 16),
-            @truncate(val >> 8),  @truncate(val),
+        try writer.writeAll(&.{
+            prefix | 27,
+            @truncate(val >> 56),
+            @truncate(val >> 48),
+            @truncate(val >> 40),
+            @truncate(val >> 32),
+            @truncate(val >> 24),
+            @truncate(val >> 16),
+            @truncate(val >> 8),
+            @truncate(val),
         });
     }
+}
+
+/// check if map entries are already in DAG-CBOR key order
+fn keysAlreadySorted(entries: []const Value.MapEntry) bool {
+    if (entries.len <= 1) return true;
+    var prev = entries[0].key;
+    for (entries[1..]) |entry| {
+        if (prev.len > entry.key.len) return false;
+        if (prev.len == entry.key.len and std.mem.order(u8, prev, entry.key) != .lt) return false;
+        prev = entry.key;
+    }
+    return true;
 }
 
 /// DAG-CBOR map key ordering: shorter keys first, then lexicographic
@@ -500,13 +520,22 @@ pub fn encode(allocator: Allocator, writer: anytype, value: Value) !void {
         },
         .map => |entries| {
             try writeArgument(writer, 5, entries.len);
-            // DAG-CBOR: keys sorted by byte length, then lexicographically
-            const sorted = try allocator.dupe(Value.MapEntry, entries);
-            defer allocator.free(sorted);
-            std.mem.sort(Value.MapEntry, sorted, {}, dagCborKeyLessThan);
-            for (sorted) |entry| {
-                try encode(allocator, writer, .{ .text = entry.key });
-                try encode(allocator, writer, entry.value);
+            // DAG-CBOR: keys sorted by byte length, then lexicographically.
+            // fast path: skip allocation + sort when keys are already in order
+            // (common for decoded data and hand-constructed records).
+            if (keysAlreadySorted(entries)) {
+                for (entries) |entry| {
+                    try encode(allocator, writer, .{ .text = entry.key });
+                    try encode(allocator, writer, entry.value);
+                }
+            } else {
+                const sorted = try allocator.dupe(Value.MapEntry, entries);
+                defer allocator.free(sorted);
+                std.mem.sort(Value.MapEntry, sorted, {}, dagCborKeyLessThan);
+                for (sorted) |entry| {
+                    try encode(allocator, writer, .{ .text = entry.key });
+                    try encode(allocator, writer, entry.value);
+                }
             }
         },
         .boolean => |b| try writer.writeByte(if (b) @as(u8, 0xf5) else @as(u8, 0xf4)),
