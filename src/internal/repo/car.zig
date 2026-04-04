@@ -73,16 +73,23 @@ pub fn readWithOptions(allocator: Allocator, data: []const u8, options: ReadOpti
     const header_end = pos + header_len_usize;
     if (header_end > data.len) return error.UnexpectedEof;
 
-    // decode header (DAG-CBOR map with "version" and "roots")
+    // decode header using a temporary arena (the header's Value tree is only
+    // needed to extract version + roots, then discarded). this avoids leaking
+    // the header's CBOR allocations if a later allocation fails.
+    var header_arena = std.heap.ArenaAllocator.init(allocator);
+    defer header_arena.deinit();
     const header_bytes = data[pos..header_end];
-    const header = cbor.decodeAll(allocator, header_bytes) catch return error.InvalidHeader;
+    const header = cbor.decodeAll(header_arena.allocator(), header_bytes) catch return error.InvalidHeader;
 
     // validate version == 1
     const version = header.getUint("version") orelse return error.InvalidHeader;
     if (version != 1) return error.InvalidHeader;
 
-    // extract roots (array of CID links) — CAR v1 requires at least one root
+    // extract roots (array of CID links) — CAR v1 requires at least one root.
+    // CID.raw slices point into the input `data` (zero-copy), so they outlive
+    // the header arena.
     var roots: std.ArrayList(cbor.Cid) = .empty;
+    errdefer roots.deinit(allocator);
     const root_values = header.getArray("roots") orelse return error.InvalidHeader;
     for (root_values) |root_val| {
         switch (root_val) {
@@ -96,7 +103,9 @@ pub fn readWithOptions(allocator: Allocator, data: []const u8, options: ReadOpti
 
     // read blocks
     var blocks: std.ArrayList(Block) = .empty;
+    errdefer blocks.deinit(allocator);
     var block_index: std.StringHashMapUnmanaged([]const u8) = .empty;
+    errdefer block_index.deinit(allocator);
 
     while (pos < data.len) {
         // block: [varint total_len] [CID bytes] [data bytes]

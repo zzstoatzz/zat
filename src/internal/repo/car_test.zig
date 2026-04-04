@@ -321,3 +321,10 @@ test "CAR with roots but no blocks" {
     try std.testing.expectEqual(@as(usize, 1), parsed.roots.len);
     try std.testing.expectEqual(@as(usize, 0), parsed.blocks.len);
 }
+
+// note: checkAllAllocationFailures cannot be used for car.read because
+// readWithOptions uses an internal ArenaAllocator for header CBOR parsing,
+// which creates non-deterministic page-level allocations from the backing
+// allocator. the errdefer cleanup on roots/blocks/block_index in
+// readWithOptions ensures no leaks on OOM; the header arena's defer deinit
+// ensures the header Value tree is always freed.
