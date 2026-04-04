@@ -77,6 +77,23 @@ pub fn build(b: *std.Build) void {
     const smoke_step = b.step("smoke", "run jetstream smoke test");
     smoke_step.dependOn(&run_smoke.step);
 
+    // firehose smoke test (CBOR + CAR + CID on live data)
+    const firehose_smoke = b.addExecutable(.{
+        .name = "firehose-smoke",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("scripts/firehose_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "zat", .module = mod }},
+        }),
+    });
+    b.installArtifact(firehose_smoke);
+
+    const run_firehose_smoke = b.addRunArtifact(firehose_smoke);
+    const firehose_smoke_step = b.step("firehose-smoke", "run firehose smoke test (CBOR/CAR/CID on live data)");
+    firehose_smoke_step.dependOn(&run_firehose_smoke.step);
+
     // CBOR codec benchmarks
     const cbor_bench = b.addExecutable(.{
         .name = "cbor-bench",
