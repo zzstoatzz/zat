@@ -858,6 +858,7 @@ pub fn decodeMstNode(allocator: Allocator, data: []const u8) !MstNodeData {
     const arr_hdr = cbor.readArrayHeader(data, pos) catch return error.InvalidMstNode;
     pos = arr_hdr.end;
     const entries = try allocator.alloc(MstEntryData, @intCast(arr_hdr.val));
+    errdefer allocator.free(entries);
     for (entries) |*entry| {
         const result = readMstEntry(data, pos) catch return error.InvalidMstNode;
         entry.* = result.entry;

@@ -205,3 +205,49 @@ test "keyHeight: different keys can have different heights" {
     try std.testing.expectEqual(@as(u32, 1), mst.keyHeight("blue"));
     try std.testing.expectEqual(@as(u32, 0), mst.keyHeight("asdf"));
 }
+
+// === allocation failure safety ===
+
+fn decodeMstNodeImpl(backing: std.mem.Allocator, data: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(backing);
+    defer arena.deinit();
+    _ = try mst.decodeMstNode(arena.allocator(), data);
+}
+
+test "checkAllAllocationFailures: decodeMstNode" {
+    // build a valid MST node CBOR by hand:
+    // map(2) { "e": [ map(4){k,p,t,v}, map(4){k,p,t,v} ], "l": null }
+    var setup_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer setup_arena.deinit();
+    const sa = setup_arena.allocator();
+
+    const val_cid = try Cid.forDagCbor(sa, "value");
+
+    // build entry maps (the "k","p","t","v" maps inside the "e" array)
+    const entry1: cbor.Value = .{ .map = &.{
+        .{ .key = "k", .value = .{ .bytes = "app.bsky.feed.post/aaa" } },
+        .{ .key = "p", .value = .{ .unsigned = 0 } },
+        .{ .key = "t", .value = .null },
+        .{ .key = "v", .value = .{ .cid = val_cid } },
+    } };
+    const entry2: cbor.Value = .{
+        .map = &.{
+            .{ .key = "k", .value = .{ .bytes = "bbb" } },
+            .{ .key = "p", .value = .{ .unsigned = 22 } }, // prefix_len = shared with prev key
+            .{ .key = "t", .value = .null },
+            .{ .key = "v", .value = .{ .cid = val_cid } },
+        },
+    };
+
+    const node: cbor.Value = .{ .map = &.{
+        .{ .key = "e", .value = .{ .array = &.{ entry1, entry2 } } },
+        .{ .key = "l", .value = .null },
+    } };
+    const encoded = try cbor.encodeAlloc(sa, node);
+
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        decodeMstNodeImpl,
+        .{encoded},
+    );
+}
