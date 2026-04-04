@@ -1209,6 +1209,68 @@ test "reject tag 42 with only prefix + 1 byte (too short for CID)" {
     }));
 }
 
+// === allocation failure safety (checkAllAllocationFailures) ===
+
+fn decodeSimpleImpl(backing: std.mem.Allocator, data: []const u8) !void {
+    // use an arena over the backing allocator — checkAllAllocationFailures
+    // tracks the backing allocator's alloc/free calls. the arena batches
+    // frees on deinit, so OOM from any arena allocation correctly frees
+    // everything allocated so far.
+    var arena = std.heap.ArenaAllocator.init(backing);
+    defer arena.deinit();
+    _ = try cbor.decodeAll(arena.allocator(), data);
+}
+
+test "checkAllAllocationFailures: decode flat map" {
+    var setup_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer setup_arena.deinit();
+    const encoded = try cbor.encodeAlloc(setup_arena.allocator(), .{ .map = &.{
+        .{ .key = "a", .value = .{ .unsigned = 1 } },
+        .{ .key = "b", .value = .{ .text = "hello" } },
+    } });
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, decodeSimpleImpl, .{encoded});
+}
+
+fn decodeNestedImpl(backing: std.mem.Allocator, data: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(backing);
+    defer arena.deinit();
+    _ = try cbor.decodeAll(arena.allocator(), data);
+}
+
+test "checkAllAllocationFailures: decode nested record" {
+    var setup_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer setup_arena.deinit();
+    const sa = setup_arena.allocator();
+
+    const record: Value = .{ .map = &.{
+        .{ .key = "$type", .value = .{ .text = "app.bsky.feed.post" } },
+        .{ .key = "langs", .value = .{ .array = &.{.{ .text = "en" }} } },
+        .{ .key = "text", .value = .{ .text = "hello" } },
+    } };
+    const encoded = try cbor.encodeAlloc(sa, record);
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, decodeNestedImpl, .{encoded});
+}
+
+fn decodeArrayImpl(backing: std.mem.Allocator, data: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(backing);
+    defer arena.deinit();
+    _ = try cbor.decodeAll(arena.allocator(), data);
+}
+
+test "checkAllAllocationFailures: decode array" {
+    var setup_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer setup_arena.deinit();
+    const encoded = try cbor.encodeAlloc(setup_arena.allocator(), .{ .array = &.{
+        .{ .unsigned = 1 },
+        .{ .unsigned = 2 },
+        .{ .text = "three" },
+    } });
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, decodeArrayImpl, .{encoded});
+}
+
 // === negative integer encode round-trip at min i64 ===
 
 test "round-trip encode min i64" {

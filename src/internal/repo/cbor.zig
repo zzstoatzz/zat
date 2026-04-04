@@ -315,6 +315,7 @@ fn decodeAt(allocator: Allocator, data: []const u8, pos: *usize, depth: usize) D
             // sanity check: each element is at least 1 byte
             if (arg.val > data.len - pos.*) return error.UnexpectedEof;
             const items = try allocator.alloc(Value, @intCast(arg.val));
+            errdefer allocator.free(items);
             for (items) |*item| {
                 item.* = try decodeAt(allocator, data, pos, depth + 1);
             }
@@ -325,6 +326,7 @@ fn decodeAt(allocator: Allocator, data: []const u8, pos: *usize, depth: usize) D
             // sanity check: each entry is at least 2 bytes (key + value)
             if (arg.val > (data.len - pos.*) / 2) return error.UnexpectedEof;
             const entries = try allocator.alloc(Value.MapEntry, @intCast(arg.val));
+            errdefer allocator.free(entries);
             for (entries, 0..) |*entry, i| {
                 // DAG-CBOR: map keys must be text strings — inline read to avoid
                 // a full decodeAt + Value union construction per key
