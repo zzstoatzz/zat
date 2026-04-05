@@ -13,6 +13,8 @@ zat publishes these docs as [`site.standard.document`](https://standard.site) re
 
 ## install
 
+requires zig 0.16+.
+
 ```bash
 zig fetch --save https://tangled.sh/zat.dev/zat/archive/main
 ```
@@ -53,13 +55,13 @@ if (zat.AtUri.parse(uri_string)) |uri| {
 
 ```zig
 // handle → DID
-var handle_resolver = zat.HandleResolver.init(allocator);
+var handle_resolver = zat.HandleResolver.init(io, allocator);
 defer handle_resolver.deinit();
 const did = try handle_resolver.resolve(zat.Handle.parse("bsky.app").?);
 defer allocator.free(did);
 
 // DID → document
-var did_resolver = zat.DidResolver.init(allocator);
+var did_resolver = zat.DidResolver.init(io, allocator);
 defer did_resolver.deinit();
 var doc = try did_resolver.resolve(zat.Did.parse("did:plc:z72i7hdynmk6r22z27h6tvur").?);
 defer doc.deinit();
@@ -164,7 +166,7 @@ ES256 (P-256) and ES256K (secp256k1) with low-S normalization. RFC 6979 determin
 <summary><strong>repo verification</strong> - full AT Protocol trust chain</summary>
 
 ```zig
-const result = try zat.verifyRepo(allocator, "pfrazee.com");
+const result = try zat.verifyRepo(io, allocator, "pfrazee.com");
 defer result.deinit();
 
 // result.did, result.signing_key, result.pds_endpoint
@@ -181,19 +183,21 @@ given a handle or DID, resolves identity, fetches the repo, parses every CAR blo
 <summary><strong>firehose client</strong> - raw CBOR event stream from relay</summary>
 
 ```zig
-var client = zat.FirehoseClient.init(allocator, .{});
+var client = zat.FirehoseClient.init(io, allocator, .{});
 defer client.deinit();
 
-try client.connect();
-while (try client.next()) |event| {
-    switch (event.header.type) {
-        .commit => {
-            const car_data = try zat.car.read(allocator, event.body.blocks);
-            // process blocks...
-        },
-        else => {},
+const Handler = struct {
+    pub fn onEvent(_: *@This(), event: zat.FirehoseClient.Event) void {
+        switch (event.header.type) {
+            .commit => {
+                // event.body.blocks, event.body.ops, ...
+            },
+            else => {},
+        }
     }
-}
+};
+var handler: Handler = .{};
+try client.subscribe(&handler);
 ```
 
 connects to `com.atproto.sync.subscribeRepos` via WebSocket. decodes binary CBOR frames into typed events. round-robin host rotation with backoff.
@@ -204,18 +208,22 @@ connects to `com.atproto.sync.subscribeRepos` via WebSocket. decodes binary CBOR
 <summary><strong>jetstream client</strong> - typed JSON event stream</summary>
 
 ```zig
-var client = zat.JetstreamClient.init(allocator, .{
+var client = zat.JetstreamClient.init(io, allocator, .{
     .wanted_collections = &.{"app.bsky.feed.post"},
 });
 defer client.deinit();
 
-try client.connect();
-while (try client.next()) |event| {
-    if (event.commit) |commit| {
-        const record = commit.record;
-        // process...
+const Handler = struct {
+    pub fn onEvent(_: *@This(), event: zat.JetstreamClient.Event) void {
+        if (event.commit) |commit| {
+            const record = commit.record;
+            // process...
+            _ = record;
+        }
     }
-}
+};
+var handler: Handler = .{};
+try client.subscribe(&handler);
 ```
 
 connects to jetstream (bluesky's JSON event stream). typed events, automatic reconnection with cursor tracking, round-robin across community relays.
@@ -226,7 +234,7 @@ connects to jetstream (bluesky's JSON event stream). typed events, automatic rec
 <summary><strong>xrpc client</strong> - call AT Protocol endpoints</summary>
 
 ```zig
-var client = zat.XrpcClient.init(allocator, "https://bsky.social");
+var client = zat.XrpcClient.init(io, allocator, "https://bsky.social");
 defer client.deinit();
 
 const nsid = zat.Nsid.parse("app.bsky.actor.getProfile").?;

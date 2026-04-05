@@ -1,5 +1,14 @@
 # changelog
 
+## 0.3.0
+
+- **breaking**: zig 0.16 — all networking APIs take `io: std.Io` as first parameter
+- **breaking**: streaming clients use `subscribe(handler)` pattern instead of `connect()` + `next()` loop
+- **breaking**: websocket.zig bumped — Io-native server accept loop, client write lock, TLS stream support
+- **feat**: `Io.Timestamp` replaces libc `gettimeofday` in JWT/OAuth
+- **feat**: `io.sleep()` replaces libc `nanosleep` in reconnect backoff (cancellation-aware)
+- **docs**: [devlog 008](devlog/008-the-io-migration.md) — the 0.16 migration
+
 ## 0.2.18
 
 - **feat**: export `HttpTransport` from root module — consumers can now use `zat.HttpTransport` for direct HTTP access without going through `XrpcClient`
