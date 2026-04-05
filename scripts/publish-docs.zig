@@ -69,27 +69,7 @@ pub fn main() !void {
     // publish each doc with deterministic TIDs (same base timestamp, incrementing clock_id)
     const now = timestamp();
 
-    for (docs, 0..) |doc, i| {
-        const content = std.Io.Dir.readFileAlloc(.cwd(), std.Options.debug_io, doc.file, allocator, .limited(1024 * 1024)) catch |err| {
-            std.debug.print("warning: could not read {s}: {}\n", .{ doc.file, err });
-            continue;
-        };
-        defer allocator.free(content);
-
-        const title = extractTitle(content) orelse doc.file;
-        const tid = zat.Tid.fromTimestamp(1704067200000000, @intCast(i + 1)); // clock_id 1, 2, 3...
-
-        const doc_record = Document{
-            .site = pub_uri,
-            .title = title,
-            .path = doc.path,
-            .textContent = content,
-            .publishedAt = &now,
-        };
-
-        try putRecord(&client, allocator, session.did, "site.standard.document", tid.str(), doc_record);
-        std.debug.print("published: {s} -> at://{s}/site.standard.document/{s}\n", .{ doc.file, session.did, tid.str() });
-    }
+    try publishEntries(&client, allocator, session.did, &docs, pub_uri, 1, &now);
 
     // devlog publication (clock_id 100 to separate from docs)
     const devlog_tid = zat.Tid.fromTimestamp(1704067200000000, 100);
@@ -107,28 +87,7 @@ pub fn main() !void {
     try devlog_uri_buf.print(allocator, "at://{s}/site.standard.publication/{s}", .{ session.did, devlog_tid.str() });
     const devlog_uri = devlog_uri_buf.items;
 
-    // publish devlog entries (clock_id 101, 102, ...)
-    for (devlog, 0..) |entry, i| {
-        const content = std.Io.Dir.readFileAlloc(.cwd(), std.Options.debug_io, entry.file, allocator, .limited(1024 * 1024)) catch |err| {
-            std.debug.print("warning: could not read {s}: {}\n", .{ entry.file, err });
-            continue;
-        };
-        defer allocator.free(content);
-
-        const title = extractTitle(content) orelse entry.file;
-        const tid = zat.Tid.fromTimestamp(1704067200000000, @intCast(101 + i));
-
-        const doc_record = Document{
-            .site = devlog_uri,
-            .title = title,
-            .path = entry.path,
-            .textContent = content,
-            .publishedAt = &now,
-        };
-
-        try putRecord(&client, allocator, session.did, "site.standard.document", tid.str(), doc_record);
-        std.debug.print("published: {s} -> at://{s}/site.standard.document/{s}\n", .{ entry.file, session.did, tid.str() });
-    }
+    try publishEntries(&client, allocator, session.did, &devlog, devlog_uri, 101, &now);
 
     std.debug.print("done\n", .{});
 }
@@ -189,27 +148,24 @@ fn createSession(client: *zat.XrpcClient, allocator: Allocator, handle: []const 
 }
 
 fn putRecord(client: *zat.XrpcClient, allocator: Allocator, repo: []const u8, collection: []const u8, rkey: []const u8, record: anytype) !void {
-    // serialize record to json
-    var record_buf: std.ArrayList(u8) = .empty;
-    defer record_buf.deinit(allocator);
-    try record_buf.print(allocator, "{f}", .{std.json.fmt(record, .{})});
+    const PutRecordInput = struct {
+        repo: []const u8,
+        collection: []const u8,
+        rkey: []const u8,
+        record: @TypeOf(record),
+    };
 
-    // build request body
-    var body: std.ArrayList(u8) = .empty;
-    defer body.deinit(allocator);
-
-    try body.appendSlice(allocator, "{\"repo\":\"");
-    try body.appendSlice(allocator, repo);
-    try body.appendSlice(allocator, "\",\"collection\":\"");
-    try body.appendSlice(allocator, collection);
-    try body.appendSlice(allocator, "\",\"rkey\":\"");
-    try body.appendSlice(allocator, rkey);
-    try body.appendSlice(allocator, "\",\"record\":");
-    try body.appendSlice(allocator, record_buf.items);
-    try body.append(allocator, '}');
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.print(allocator, "{f}", .{std.json.fmt(PutRecordInput{
+        .repo = repo,
+        .collection = collection,
+        .rkey = rkey,
+        .record = record,
+    }, .{})});
 
     const nsid = zat.Nsid.parse("com.atproto.repo.putRecord").?;
-    var response = try client.procedure(nsid, body.items);
+    var response = try client.procedure(nsid, buf.items);
     defer response.deinit();
 
     if (!response.ok()) {
@@ -236,35 +192,54 @@ fn extractTitle(content: []const u8) ?[]const u8 {
     return null;
 }
 
+fn publishEntries(
+    client: *zat.XrpcClient,
+    allocator: Allocator,
+    did: []const u8,
+    entries: []const DocEntry,
+    site_uri: []const u8,
+    clock_id_base: usize,
+    now: *const [20]u8,
+) !void {
+    for (entries, 0..) |entry, i| {
+        const content = std.Io.Dir.readFileAlloc(.cwd(), std.Options.debug_io, entry.file, allocator, .limited(1024 * 1024)) catch |err| {
+            std.debug.print("warning: could not read {s}: {}\n", .{ entry.file, err });
+            continue;
+        };
+        defer allocator.free(content);
+
+        const title = extractTitle(content) orelse entry.file;
+        const tid = zat.Tid.fromTimestamp(1704067200000000, @intCast(clock_id_base + i));
+
+        const record = Document{
+            .site = site_uri,
+            .title = title,
+            .path = entry.path,
+            .textContent = content,
+            .publishedAt = now,
+        };
+
+        try putRecord(client, allocator, did, "site.standard.document", tid.str(), record);
+        std.debug.print("published: {s} -> at://{s}/site.standard.document/{s}\n", .{ entry.file, did, tid.str() });
+    }
+}
+
 fn timestamp() [20]u8 {
-    const epoch_seconds: i64 = @intCast(@divFloor(std.Io.Timestamp.now(std.Options.debug_io, .real).nanoseconds, std.time.ns_per_s));
-    const days: i32 = @intCast(@divFloor(epoch_seconds, std.time.s_per_day));
-    const day_secs: u32 = @intCast(@mod(epoch_seconds, std.time.s_per_day));
-
-    // calculate year/month/day from days since epoch (1970-01-01)
-    var y: i32 = 1970;
-    var remaining = days;
-    while (true) {
-        const year_days: i32 = if (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0)) 366 else 365;
-        if (remaining < year_days) break;
-        remaining -= year_days;
-        y += 1;
-    }
-
-    const is_leap = @mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0);
-    const month_days = [12]u8{ 31, if (is_leap) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    var m: usize = 0;
-    while (m < 12 and remaining >= month_days[m]) : (m += 1) {
-        remaining -= month_days[m];
-    }
-
-    const hours = day_secs / 3600;
-    const mins = (day_secs % 3600) / 60;
-    const secs = day_secs % 60;
+    const ns = std.Io.Timestamp.now(std.Options.debug_io, .real).nanoseconds;
+    const secs: u64 = @intCast(@divFloor(ns, std.time.ns_per_s));
+    const es = std.time.epoch.EpochSeconds{ .secs = secs };
+    const yd = es.getEpochDay().calculateYearDay();
+    const md = yd.calculateMonthDay();
+    const ds = es.getDaySeconds();
 
     var buf: [20]u8 = undefined;
     _ = std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        @as(u32, @intCast(y)), @as(u32, @intCast(m + 1)), @as(u32, @intCast(remaining + 1)), hours, mins, secs,
+        yd.year,
+        @as(u32, md.month.numeric()),
+        @as(u32, md.day_index) + 1,
+        @as(u32, ds.getHoursIntoDay()),
+        @as(u32, ds.getMinutesIntoHour()),
+        @as(u32, ds.getSecondsIntoMinute()),
     }) catch unreachable;
     return buf;
 }
