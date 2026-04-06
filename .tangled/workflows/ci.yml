@@ -6,13 +6,19 @@ engine: nixery
 
 dependencies:
   nixpkgs:
-    - zig
+    - curl
+    - xz
 
 steps:
+  - name: install zig 0.16
+    command: |
+      curl -sSL https://ziglang.org/builds/zig-linux-x86_64-0.16.0-dev.3059+42e33db9d.tar.xz | tar -xJ -C /tangled/workspace
+      mv /tangled/workspace/zig-linux-x86_64-0.16.0-dev.3059+42e33db9d /tangled/workspace/.zig
+
   - name: check formatting
     command: |
-      zig fmt --check .
+      /tangled/workspace/.zig/zig fmt --check .
 
   - name: run tests
     command: |
-      zig build test --summary all
+      /tangled/workspace/.zig/zig build test --summary all
