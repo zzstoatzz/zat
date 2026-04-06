@@ -1,23 +1,24 @@
 const navEl = document.getElementById("nav");
 const contentEl = document.getElementById("content");
-const menuToggle = document.querySelector(".menu-toggle");
-const sidebar = document.querySelector(".sidebar");
-const overlay = document.querySelector(".overlay");
+const themeToggle = document.querySelector(".theme-toggle");
 
-function toggleMenu(open) {
-  const isOpen = open ?? !sidebar.classList.contains("open");
-  sidebar.classList.toggle("open", isOpen);
-  overlay?.classList.toggle("open", isOpen);
-  menuToggle?.setAttribute("aria-expanded", isOpen);
-  document.body.style.overflow = isOpen ? "hidden" : "";
+// Theme toggle
+function getPreferredTheme() {
+  const stored = localStorage.getItem("theme");
+  if (stored) return stored;
+  return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
 }
 
-menuToggle?.addEventListener("click", () => toggleMenu());
-overlay?.addEventListener("click", () => toggleMenu(false));
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  localStorage.setItem("theme", theme);
+}
 
-// Close menu when nav link clicked (mobile)
-navEl?.addEventListener("click", (e) => {
-  if (e.target.closest("a")) toggleMenu(false);
+applyTheme(getPreferredTheme());
+
+themeToggle?.addEventListener("click", () => {
+  const current = document.documentElement.getAttribute("data-theme") || getPreferredTheme();
+  applyTheme(current === "dark" ? "light" : "dark");
 });
 
 const buildId = new URL(import.meta.url).searchParams.get("v") || "";
@@ -110,7 +111,6 @@ function installContentLinkHandler() {
 
 async function main() {
   // SPA fallback: convert pathname to hash route so deep links work
-  // e.g. /roadmap -> #roadmap.md, /devlog/001 -> #devlog/001.md
   if (location.pathname !== "/" && !location.hash) {
     const path = location.pathname.replace(/^\/+/, "");
     if (path) {
@@ -144,7 +144,7 @@ async function main() {
     renderNav(pages, activePath);
 
     if (!activePath) {
-      contentEl.innerHTML = `<p class="empty">No docs yet. Add markdown files under <code>zat/docs/</code> and push to <code>main</code>.</p>`;
+      contentEl.innerHTML = `<p class="empty">No docs yet.</p>`;
       return;
     }
 
@@ -153,7 +153,6 @@ async function main() {
       const html = globalThis.marked.parse(md);
       contentEl.innerHTML = html;
 
-      // Update current marker after navigation re-render.
       for (const a of navEl.querySelectorAll("a")) {
         const href = decodeURIComponent((a.getAttribute("href") || "").slice(1));
         a.toggleAttribute("aria-current", normalizeDocPath(href) === activePath);
