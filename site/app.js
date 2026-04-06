@@ -76,6 +76,7 @@ function renderNav(pages, activePath) {
   }
 
   navEl.innerHTML = pages
+    .filter((p) => normalizeDocPath(p.path) !== "index.md")
     .map((p) => {
       const path = normalizeDocPath(p.path);
       const title = escapeHtml(p.title || path);
