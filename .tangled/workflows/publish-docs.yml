@@ -6,10 +6,17 @@ engine: nixery
 
 dependencies:
   nixpkgs:
-    - zig
+    - curl
+    - gnutar
+    - xz
 
 steps:
+  - name: install zig 0.16
+    command: |
+      curl -sSL https://ziglang.org/builds/zig-x86_64-linux-0.16.0-dev.3059+42e33db9d.tar.xz | tar -xJ -C /tangled/workspace
+      mv /tangled/workspace/zig-x86_64-linux-0.16.0-dev.3059+42e33db9d /tangled/workspace/.zig
+
   - name: build and publish docs to ATProto
     command: |
-      zig build
+      /tangled/workspace/.zig/zig build
       ./zig-out/bin/publish-docs
