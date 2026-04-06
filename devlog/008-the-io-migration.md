@@ -4,12 +4,12 @@ zig 0.16 replaced the networking and concurrency primitives. `std.net`, `std.Thr
 
 ## what changed in 0.16
 
-`std.Io` is a backend-agnostic interface for all I/O and concurrency. two backends:
+[`std.Io`](https://ziglang.org/documentation/master/std/#std.Io) is a backend-agnostic interface for all I/O and concurrency. two backends:
 
-- **Threaded** — always available. `io.concurrent()` spawns OS threads.
-- **Evented** — fiber-based. io_uring on linux, GCD on macOS, kqueue on BSD. `io.concurrent()` creates cheap userspace coroutines.
+- [**Threaded**](https://ziglang.org/documentation/master/std/#std.Io.Threaded) — always available. `io.concurrent()` spawns OS threads.
+- [**Evented**](https://ziglang.org/documentation/master/std/#std.Io.Evented) — fiber-based. [io_uring on linux, GCD on macOS, kqueue on BSD](https://ziglang.org/devlog/2026/#2026-02-13). `io.concurrent()` creates cheap userspace coroutines.
 
-same code runs on both. you write against `Io`, pick the backend at init, and the scheduler does the rest. `io.async()` for CPU work (bounded pool, overflow runs inline). `io.concurrent()` for I/O tasks (unbounded under Threaded, fibers under Evented). `io.sleep()` is cancellation-aware. `Io.Mutex` integrates with the scheduler's futex.
+same code runs on both. you write against `Io`, pick the backend at init, and the scheduler does the rest. [`io.async()`](https://ziglang.org/documentation/master/std/#std.Io.async) for CPU work (may run inline if no concurrency available). [`io.concurrent()`](https://ziglang.org/documentation/master/std/#std.Io.concurrent) for I/O tasks (OS threads under Threaded, fibers under Evented). `io.sleep()` is cancellation-aware. [`Io.Mutex`](https://ziglang.org/documentation/master/std/#std.Io.Mutex) integrates with the scheduler's futex.
 
 the promise: write once, switch backends, get threads or fibers for free.
 
@@ -52,7 +52,7 @@ then we deployed the relay.
 
 ## the relay migration
 
-[zlay](https://tangled.sh/zzstoatzz.io/zlay) is an AT Protocol relay — ~8,400 lines of zig, ~2,750 PDS subscribers, WebSocket fan-out to downstream consumers. it was the heaviest consumer of the 0.15 API surface. migrating it to 0.16 compiled on the first try.
+[zlay](https://tangled.org/zzstoatzz.io/zlay) is an AT Protocol relay — ~8,400 lines of zig, ~2,750 PDS subscribers, WebSocket fan-out to downstream consumers. it was the heaviest consumer of the 0.15 API surface. migrating it to 0.16 compiled on the first try.
 
 nine crashes followed.
 
@@ -222,7 +222,7 @@ after fixing crashes 1–8, the relay ran on Evented with ReleaseFast. (ReleaseS
 
 the logs showed nothing unusual. chain breaks (expected after restarts when cursor positions are stale), normal reconnection cycles, then sudden death. 13 restarts in 12 hours.
 
-we had a separate observation that was shaping our thinking: a minimal repro (`scripts/repro_evented.zig`) that spawns a single fiber and returns GPFs immediately under ReleaseSafe. the crash lands in `fiber.zig:contextSwitch` → `Uring.zig:mainIdle`. so we had a confirmed fiber context-switch bug under one build mode, and a mystery SIGSEGV under another. the natural conclusion: same bug, different manifestation. ReleaseFast just hides it longer because the optimizer arranges code differently.
+we had a separate observation that was shaping our thinking: a minimal repro ([`repro_evented.zig`](https://tangled.org/zzstoatzz.io/zlay/tree/main/scripts/repro_evented.zig)) that spawns a single fiber and returns GPFs immediately under ReleaseSafe. the crash lands in `fiber.zig:contextSwitch` → `Uring.zig:mainIdle`. so we had a confirmed fiber context-switch bug under one build mode, and a mystery SIGSEGV under another. the natural conclusion: same bug, different manifestation. ReleaseFast just hides it longer because the optimizer arranges code differently.
 
 we spent time investigating the fiber machinery, reading disassembly of the context switch, checking for upstream fixes (fiber.zig was unchanged across 32 dev builds). we considered patching the context switch ourselves. we checked upstream Uring networking implementation status — still fully stubbed. we read the zig team's position on Evented — "experimental," "important followup work to be done."
 
@@ -248,7 +248,7 @@ line_start = line_end + 2;
 if (line_start > pos) break;  // ← TCP split mid-CRLF, read more
 ```
 
-this is the bug that ReleaseSafe would have caught on the first occurrence, with a stack trace pointing directly at the line. instead, we ran ReleaseFast for weeks, saw silent SIGSEGVs, and blamed the fiber scheduler.
+this is the bug that ReleaseSafe would have caught on the first occurrence, with a stack trace pointing directly at the line. instead, we ran ReleaseFast for days, saw silent SIGSEGVs, and blamed the fiber scheduler.
 
 ## the ReleaseSafe problem
 
@@ -269,7 +269,7 @@ asm volatile (
 
 under ReleaseFast, there's a `lea` that loads the SwitchMessage stack address into `%rsi` before the asm. under ReleaseSafe, that `lea` appears to be missing — `%rsi` holds a stale value from a prior function call. the ReleaseSafe prologue adds stack probing (`__zig_probe_stack`) and a canary (`fs:0x28`), which change the code layout surrounding the inline asm. we think this is why the register allocation differs, but we're not certain — there may be something else going on.
 
-we've written this up as a [bug report](scripts/fiber_gpf_issue.md) with a standalone reproduction.
+we've written this up as a [bug report](https://tangled.org/zzstoatzz.io/zlay/tree/main/scripts/fiber_gpf_issue.md) with a standalone reproduction.
 
 this is a real problem for the ecosystem. ReleaseSafe is the mode designed for production services that want optimization with safety checks. TigerBeetle uses it. the zig compiler's own nightlies recently switched to it. Ghostty and Bun use ReleaseFast, but both have noted they'd prefer ReleaseSafe if the performance cost were lower. for `Io.Evented` to be a viable production backend, it needs to work with ReleaseSafe.
 
@@ -287,6 +287,6 @@ the biggest lesson wasn't technical. we had a confirmed bug in the fiber context
 
 the thing that found it was switching to ReleaseSafe. not to fix the crash — we'd already reverted to Threaded for that — but because reverting happened to re-enable the build mode that had the safety checks. the bounds check caught the real bug on the first handshake that split on `\r\n`.
 
-there are two bugs here and they're both real. the websocket off-by-one was the production crash. the ReleaseSafe GPF is a separate issue that blocks Evented from running with safety checks. we're filing the latter upstream. in the meantime, ReleaseFast works, and we know what to look for when it doesn't.
+there are two bugs here and they're both real. the websocket off-by-one was the production crash. the ReleaseSafe GPF is a separate issue that blocks Evented from running with safety checks. we'd consider [filing the latter upstream](https://tangled.org/zzstoatzz.io/zlay/tree/main/scripts/fiber_gpf_issue.md). in the meantime, ReleaseFast works, and we know what to look for when it doesn't.
 
-zat is v0.3.0. the Io parameter is the only breaking change.
+zat is v0.3.0-alpha. the Io parameter is the only breaking change.
