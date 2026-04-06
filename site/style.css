@@ -11,9 +11,9 @@
   --accent: rgba(125, 180, 245, 0.08);
   --radius: 10px;
   --gutter: 16px;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
-    "Courier New", monospace;
-  --sans: -apple-system, system-ui, "Segoe UI", Roboto, Helvetica, Arial,
+  --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  --sans: "Geist", -apple-system, system-ui, "Segoe UI", Roboto, Helvetica, Arial,
     sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
 }
 
@@ -57,8 +57,11 @@ body {
 body {
   margin: 0;
   font-family: var(--sans);
+  font-weight: 400;
   background: var(--bg);
   color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 a {
@@ -125,6 +128,7 @@ a:hover {
   border-radius: 6px;
   color: var(--muted);
   font-size: 13px;
+  font-weight: 500;
   white-space: nowrap;
   transition: color 0.1s, background 0.1s;
 }
@@ -150,6 +154,7 @@ a:hover {
 .header-link {
   padding: 5px 10px;
   font-size: 13px;
+  font-weight: 500;
   border-radius: 6px;
   color: var(--muted);
   white-space: nowrap;
