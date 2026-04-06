@@ -222,7 +222,7 @@ after fixing crashes 1–8, the relay ran on Evented with ReleaseFast. (ReleaseS
 
 the logs showed nothing unusual. chain breaks (expected after restarts when cursor positions are stale), normal reconnection cycles, then sudden death. 13 restarts in 12 hours.
 
-we had a separate observation that was shaping our thinking: a minimal repro ([`repro_evented.zig`](https://tangled.org/zzstoatzz.io/zlay/tree/main/scripts/repro_evented.zig)) that spawns a single fiber and returns GPFs immediately under ReleaseSafe. the crash lands in `fiber.zig:contextSwitch` → `Uring.zig:mainIdle`. so we had a confirmed fiber context-switch bug under one build mode, and a mystery SIGSEGV under another. the natural conclusion: same bug, different manifestation. ReleaseFast just hides it longer because the optimizer arranges code differently.
+we had a separate observation that was shaping our thinking: a minimal repro ([`repro_evented.zig`](https://tangled.org/zzstoatzz.io/zlay/blob/main/scripts/repro_evented.zig)) that spawns a single fiber and returns GPFs immediately under ReleaseSafe. the crash lands in `fiber.zig:contextSwitch` → `Uring.zig:mainIdle`. so we had a confirmed fiber context-switch bug under one build mode, and a mystery SIGSEGV under another. the natural conclusion: same bug, different manifestation. ReleaseFast just hides it longer because the optimizer arranges code differently.
 
 we spent time investigating the fiber machinery, reading disassembly of the context switch, checking for upstream fixes (fiber.zig was unchanged across 32 dev builds). we considered patching the context switch ourselves. we checked upstream Uring networking implementation status — still fully stubbed. we read the zig team's position on Evented — "experimental," "important followup work to be done."
 
@@ -269,7 +269,7 @@ asm volatile (
 
 under ReleaseFast, there's a `lea` that loads the SwitchMessage stack address into `%rsi` before the asm. under ReleaseSafe, that `lea` appears to be missing — `%rsi` holds a stale value from a prior function call. the ReleaseSafe prologue adds stack probing (`__zig_probe_stack`) and a canary (`fs:0x28`), which change the code layout surrounding the inline asm. we think this is why the register allocation differs, but we're not certain — there may be something else going on.
 
-we've written this up as a [bug report](https://tangled.org/zzstoatzz.io/zlay/tree/main/scripts/fiber_gpf_issue.md) with a standalone reproduction.
+we've written this up as a [bug report](https://tangled.org/zzstoatzz.io/zlay/blob/main/scripts/fiber_gpf_issue.md) with a standalone reproduction.
 
 this is a real problem for the ecosystem. ReleaseSafe is the mode designed for production services that want optimization with safety checks. TigerBeetle uses it. the zig compiler's own nightlies recently switched to it. Ghostty and Bun use ReleaseFast, but both have noted they'd prefer ReleaseSafe if the performance cost were lower. for `Io.Evented` to be a viable production backend, it needs to work with ReleaseSafe.
 
@@ -287,6 +287,6 @@ the biggest lesson wasn't technical. we had a confirmed bug in the fiber context
 
 the thing that found it was switching to ReleaseSafe. not to fix the crash — we'd already reverted to Threaded for that — but because reverting happened to re-enable the build mode that had the safety checks. the bounds check caught the real bug on the first handshake that split on `\r\n`.
 
-there are two bugs here and they're both real. the websocket off-by-one was the production crash. the ReleaseSafe GPF is a separate issue that blocks Evented from running with safety checks. we'd consider [filing the latter upstream](https://tangled.org/zzstoatzz.io/zlay/tree/main/scripts/fiber_gpf_issue.md). in the meantime, ReleaseFast works, and we know what to look for when it doesn't.
+there are two bugs here and they're both real. the websocket off-by-one was the production crash. the ReleaseSafe GPF is a separate issue that blocks Evented from running with safety checks. we'd consider [filing the latter upstream](https://tangled.org/zzstoatzz.io/zlay/blob/main/scripts/fiber_gpf_issue.md). in the meantime, ReleaseFast works, and we know what to look for when it doesn't.
 
 zat is v0.3.0-alpha. the Io parameter is the only breaking change.
