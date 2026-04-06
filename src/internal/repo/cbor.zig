@@ -34,7 +34,6 @@ pub const Value = union(enum) {
     text: []const u8,
     array: []const Value,
     map: []const MapEntry,
-    tag: Tag,
     boolean: bool,
     null,
     cid: Cid,
@@ -42,11 +41,6 @@ pub const Value = union(enum) {
     pub const MapEntry = struct {
         key: []const u8, // DAG-CBOR: keys are always text strings
         value: Value,
-    };
-
-    pub const Tag = struct {
-        number: u64,
-        content: *const Value,
     };
 
     /// look up a key in a map value
@@ -114,6 +108,15 @@ pub const Value = union(enum) {
         const v = self.get(key) orelse return null;
         return switch (v) {
             .array => |a| a,
+            else => null,
+        };
+    }
+
+    /// get a CID from a map by key
+    pub fn getCid(self: Value, key: []const u8) ?Cid {
+        const v = self.get(key) orelse return null;
+        return switch (v) {
+            .cid => |c| c,
             else => null,
         };
     }
@@ -201,15 +204,18 @@ pub const Cid = struct {
         var hash: [Sha256.digest_length]u8 = undefined;
         Sha256.hash(data, &hash, .{});
 
-        var aw: std.Io.Writer.Allocating = .init(allocator);
-        errdefer aw.deinit();
-        try writeUvarint(&aw.writer, ver);
-        try writeUvarint(&aw.writer, cod);
-        try writeUvarint(&aw.writer, hash_fn_code);
-        try writeUvarint(&aw.writer, Sha256.digest_length);
-        try aw.writer.writeAll(&hash);
+        // build CID on the stack then copy to allocator — avoids dynamic writer
+        // overhead. max varint size is 10 bytes × 4 fields + 32 byte hash = 72 bytes.
+        var buf: [72]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        writeUvarint(&w, ver) catch unreachable;
+        writeUvarint(&w, cod) catch unreachable;
+        writeUvarint(&w, hash_fn_code) catch unreachable;
+        writeUvarint(&w, Sha256.digest_length) catch unreachable;
+        w.writeAll(&hash) catch unreachable;
 
-        return .{ .raw = try aw.toOwnedSlice() };
+        const raw = try allocator.dupe(u8, w.buffered());
+        return .{ .raw = raw };
     }
 
     /// serialize this CID to raw bytes (version varint + codec varint + multihash)
@@ -228,167 +234,171 @@ pub const DecodeError = error{
     ReservedAdditionalInfo,
     Overflow,
     OutOfMemory,
+    NonMinimalEncoding,
+    TrailingBytes,
+    UnsupportedTag,
+    UnsortedMapKeys,
+    DuplicateMapKey,
+    InvalidUtf8,
+    MaxDepthExceeded,
+    WrongType,
 };
+
+/// maximum nesting depth for arrays/maps to prevent stack overflow
+pub const max_depth: usize = 128;
 
 /// decode a single CBOR value from the front of `data`.
 /// returns the value and the number of bytes consumed.
 pub fn decode(allocator: Allocator, data: []const u8) DecodeError!struct { value: Value, consumed: usize } {
     var pos: usize = 0;
-    const value = try decodeAt(allocator, data, &pos);
+    const value = try decodeAt(allocator, data, &pos, 0);
     return .{ .value = value, .consumed = pos };
 }
 
-/// decode all bytes as a single CBOR value
+/// decode all bytes as a single CBOR value, rejecting trailing bytes
 pub fn decodeAll(allocator: Allocator, data: []const u8) DecodeError!Value {
     var pos: usize = 0;
-    return try decodeAt(allocator, data, &pos);
+    const value = try decodeAt(allocator, data, &pos, 0);
+    if (pos != data.len) return error.TrailingBytes;
+    return value;
 }
 
-fn decodeAt(allocator: Allocator, data: []const u8, pos: *usize) DecodeError!Value {
+fn decodeAt(allocator: Allocator, data: []const u8, pos: *usize, depth: usize) DecodeError!Value {
     if (pos.* >= data.len) return error.UnexpectedEof;
-
     const initial = data[pos.*];
-    pos.* += 1;
-
-    const major: MajorType = @enumFromInt(@as(u3, @truncate(initial >> 5)));
+    const major: u3 = @truncate(initial >> 5);
     const additional: u5 = @truncate(initial);
 
-    return switch (major) {
-        .unsigned => {
-            const val = try readArgument(data, pos, additional);
-            return .{ .unsigned = val };
-        },
-        .negative => {
-            const val = try readArgument(data, pos, additional);
+    // simple values (major 7) are handled without readArg since floats
+    // use additional 25/26/27 to mean float16/32/64, not integer arguments
+    if (major == 7) {
+        pos.* += 1;
+        return switch (additional) {
+            20 => .{ .boolean = false },
+            21 => .{ .boolean = true },
+            22 => .null,
+            25, 26, 27 => error.UnsupportedFloat, // DAG-CBOR forbids floats in AT Protocol
+            31 => error.IndefiniteLength, // break code — DAG-CBOR forbids indefinite lengths
+            else => error.UnsupportedSimpleValue,
+        };
+    }
+
+    const arg = try readArg(data, pos.*);
+    pos.* = arg.end;
+
+    return switch (@as(MajorType, @enumFromInt(major))) {
+        .unsigned => .{ .unsigned = arg.val },
+        .negative => blk: {
             // negative CBOR: value is -1 - val
-            if (val > std.math.maxInt(i64)) return error.Overflow;
-            return .{ .negative = -1 - @as(i64, @intCast(val)) };
+            if (arg.val > std.math.maxInt(i64)) return error.Overflow;
+            break :blk .{ .negative = -1 - @as(i64, @intCast(arg.val)) };
         },
-        .byte_string => {
-            const len = try readArgument(data, pos, additional);
-            const end = pos.* + @as(usize, @intCast(len));
+        .byte_string => blk: {
+            const len = std.math.cast(usize, arg.val) orelse return error.UnexpectedEof;
+            const end = std.math.add(usize, pos.*, len) catch return error.UnexpectedEof;
             if (end > data.len) return error.UnexpectedEof;
             const bytes = data[pos.*..end];
             pos.* = end;
-            return .{ .bytes = bytes };
+            break :blk .{ .bytes = bytes };
         },
-        .text_string => {
-            const len = try readArgument(data, pos, additional);
-            const end = pos.* + @as(usize, @intCast(len));
+        .text_string => blk: {
+            const len = std.math.cast(usize, arg.val) orelse return error.UnexpectedEof;
+            const end = std.math.add(usize, pos.*, len) catch return error.UnexpectedEof;
             if (end > data.len) return error.UnexpectedEof;
             const text = data[pos.*..end];
+            if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
             pos.* = end;
-            return .{ .text = text };
+            break :blk .{ .text = text };
         },
-        .array => {
-            const count = try readArgument(data, pos, additional);
-            const items = try allocator.alloc(Value, @intCast(count));
+        .array => blk: {
+            if (depth >= max_depth) return error.MaxDepthExceeded;
+            // sanity check: each element is at least 1 byte
+            if (arg.val > data.len - pos.*) return error.UnexpectedEof;
+            const items = try allocator.alloc(Value, @intCast(arg.val));
+            errdefer allocator.free(items);
             for (items) |*item| {
-                item.* = try decodeAt(allocator, data, pos);
+                item.* = try decodeAt(allocator, data, pos, depth + 1);
             }
-            return .{ .array = items };
+            break :blk .{ .array = items };
         },
-        .map => {
-            const count = try readArgument(data, pos, additional);
-            const entries = try allocator.alloc(Value.MapEntry, @intCast(count));
-            for (entries) |*entry| {
+        .map => blk: {
+            if (depth >= max_depth) return error.MaxDepthExceeded;
+            // sanity check: each entry is at least 2 bytes (key + value)
+            if (arg.val > (data.len - pos.*) / 2) return error.UnexpectedEof;
+            const entries = try allocator.alloc(Value.MapEntry, @intCast(arg.val));
+            errdefer allocator.free(entries);
+            for (entries, 0..) |*entry, i| {
                 // DAG-CBOR: map keys must be text strings — inline read to avoid
                 // a full decodeAt + Value union construction per key
-                if (pos.* >= data.len) return error.UnexpectedEof;
-                const key_byte = data[pos.*];
-                pos.* += 1;
-                if (@as(u3, @truncate(key_byte >> 5)) != 3) return error.InvalidMapKey;
-                const key_len = try readArgument(data, pos, @truncate(key_byte));
-                const key_end = pos.* + @as(usize, @intCast(key_len));
+                const key_arg = try readArg(data, pos.*);
+                pos.* = key_arg.end;
+                if (key_arg.major != 3) return error.InvalidMapKey;
+                const key_len = std.math.cast(usize, key_arg.val) orelse return error.UnexpectedEof;
+                const key_end = std.math.add(usize, pos.*, key_len) catch return error.UnexpectedEof;
                 if (key_end > data.len) return error.UnexpectedEof;
                 entry.key = data[pos.*..key_end];
+                if (!std.unicode.utf8ValidateSlice(entry.key)) return error.InvalidUtf8;
                 pos.* = key_end;
-                entry.value = try decodeAt(allocator, data, pos);
-            }
-            return .{ .map = entries };
-        },
-        .tag => {
-            const tag_num = try readArgument(data, pos, additional);
-            if (tag_num == 42) {
-                // CID link — content is a byte string with 0x00 prefix
-                const content = try decodeAt(allocator, data, pos);
-                const cid_bytes = switch (content) {
-                    .bytes => |b| b,
-                    else => return error.InvalidCid,
-                };
-                if (cid_bytes.len < 1 or cid_bytes[0] != 0x00) return error.InvalidCid;
-                return .{ .cid = .{ .raw = cid_bytes[1..] } }; // zero-cost: just reference the bytes
-            }
-            // generic tag — allocate content on heap
-            const content_ptr = try allocator.create(Value);
-            content_ptr.* = try decodeAt(allocator, data, pos);
-            return .{ .tag = .{ .number = tag_num, .content = content_ptr } };
-        },
-        .simple => {
-            return switch (additional) {
-                20 => .{ .boolean = false },
-                21 => .{ .boolean = true },
-                22 => .null,
-                25, 26, 27 => error.UnsupportedFloat, // DAG-CBOR forbids floats in AT Protocol
-                31 => error.IndefiniteLength, // break code — DAG-CBOR forbids indefinite lengths
-                else => error.UnsupportedSimpleValue,
-            };
-        },
-    };
-}
 
-/// read the argument value from additional info + following bytes
-fn readArgument(data: []const u8, pos: *usize, additional: u5) DecodeError!u64 {
-    return switch (additional) {
-        0...23 => @as(u64, additional),
-        24 => { // 1-byte
-            if (pos.* >= data.len) return error.UnexpectedEof;
-            const val = data[pos.*];
-            pos.* += 1;
-            return @as(u64, val);
+                // DAG-CBOR: keys must be sorted (shorter first, then lex) and unique
+                if (i > 0) {
+                    const prev = entries[i - 1].key;
+                    if (prev.len < entry.key.len) {
+                        // ok — shorter key first
+                    } else if (prev.len == entry.key.len) {
+                        switch (std.mem.order(u8, prev, entry.key)) {
+                            .lt => {}, // ok — lex order
+                            .eq => return error.DuplicateMapKey,
+                            .gt => return error.UnsortedMapKeys,
+                        }
+                    } else {
+                        return error.UnsortedMapKeys;
+                    }
+                }
+
+                entry.value = try decodeAt(allocator, data, pos, depth + 1);
+            }
+            break :blk .{ .map = entries };
         },
-        25 => { // 2-byte big-endian
-            if (pos.* + 2 > data.len) return error.UnexpectedEof;
-            const val = std.mem.readInt(u16, data[pos.*..][0..2], .big);
-            pos.* += 2;
-            return @as(u64, val);
+        .tag => blk: {
+            if (arg.val != 42) return error.UnsupportedTag; // DAG-CBOR only allows tag 42 (CID)
+            // CID link — content is a byte string with 0x00 prefix
+            const content = try decodeAt(allocator, data, pos, depth);
+            const cid_bytes = switch (content) {
+                .bytes => |b| b,
+                else => return error.InvalidCid,
+            };
+            // CID byte string must have 0x00 identity multibase prefix + at least
+            // version byte + codec byte (minimum 3 bytes total)
+            if (cid_bytes.len < 3 or cid_bytes[0] != 0x00) return error.InvalidCid;
+            break :blk .{ .cid = .{ .raw = cid_bytes[1..] } }; // zero-cost: just reference the bytes
         },
-        26 => { // 4-byte big-endian
-            if (pos.* + 4 > data.len) return error.UnexpectedEof;
-            const val = std.mem.readInt(u32, data[pos.*..][0..4], .big);
-            pos.* += 4;
-            return @as(u64, val);
-        },
-        27 => { // 8-byte big-endian
-            if (pos.* + 8 > data.len) return error.UnexpectedEof;
-            const val = std.mem.readInt(u64, data[pos.*..][0..8], .big);
-            pos.* += 8;
-            return val;
-        },
-        28, 29, 30 => error.ReservedAdditionalInfo,
-        31 => error.IndefiniteLength,
+        .simple => unreachable, // handled above
     };
 }
 
 /// wrap raw CID bytes (after removing the 0x00 multibase prefix) into a Cid.
-/// validates the structure is parseable but stores only the raw bytes.
+/// does not validate the CID structure — call version()/codec()/digest() to parse lazily.
 pub fn parseCid(raw: []const u8) Cid {
     return .{ .raw = raw };
 }
 
-/// read an unsigned varint (LEB128)
+/// read an unsigned varint (LEB128). rejects varints longer than 10 bytes
+/// and rejects overflow (10th byte must have value <= 1).
 pub fn readUvarint(data: []const u8, pos: *usize) ?u64 {
     var result: u64 = 0;
-    var shift: u6 = 0;
-    while (pos.* < data.len) {
+    var shift: u7 = 0;
+    for (0..10) |i| {
+        if (pos.* >= data.len) return null;
         const byte = data[pos.*];
         pos.* += 1;
-        result |= @as(u64, byte & 0x7f) << shift;
+        // 10th byte (i=9, shift=63): only bit 0 can fit in u64
+        if (i == 9 and byte > 1) return null;
+        result |= @as(u64, byte & 0x7f) << @as(u6, @intCast(shift));
         if (byte & 0x80 == 0) return result;
-        shift +|= 7;
-        if (shift >= 64) return null;
+        shift += 7;
     }
-    return null;
+    return null; // varint too long
 }
 
 // === encoder ===
@@ -397,40 +407,73 @@ pub const EncodeError = error{
     OutOfMemory,
 };
 
-/// write the CBOR initial byte + argument using shortest encoding (DAG-CBOR requirement)
+/// write the CBOR initial byte + argument using shortest encoding (DAG-CBOR requirement).
+/// batches all bytes into a single writeAll call to minimize writer dispatch overhead.
 fn writeArgument(writer: anytype, major: u3, val: u64) !void {
     const prefix: u8 = @as(u8, major) << 5;
     if (val < 24) {
-        try writer.writeByte(prefix | @as(u8, @intCast(val)));
+        try writer.writeAll(&.{prefix | @as(u8, @intCast(val))});
     } else if (val <= 0xff) {
-        try writer.writeByte(prefix | 24);
-        try writer.writeByte(@as(u8, @intCast(val)));
+        try writer.writeAll(&.{ prefix | 24, @as(u8, @intCast(val)) });
     } else if (val <= 0xffff) {
-        try writer.writeByte(prefix | 25);
         const v: u16 = @intCast(val);
-        try writer.writeAll(&[2]u8{ @truncate(v >> 8), @truncate(v) });
+        try writer.writeAll(&.{ prefix | 25, @truncate(v >> 8), @truncate(v) });
     } else if (val <= 0xffffffff) {
-        try writer.writeByte(prefix | 26);
         const v: u32 = @intCast(val);
-        try writer.writeAll(&[4]u8{
-            @truncate(v >> 24), @truncate(v >> 16),
-            @truncate(v >> 8),  @truncate(v),
+        try writer.writeAll(&.{
+            prefix | 26,
+            @truncate(v >> 24),
+            @truncate(v >> 16),
+            @truncate(v >> 8),
+            @truncate(v),
         });
     } else {
-        try writer.writeByte(prefix | 27);
-        try writer.writeAll(&[8]u8{
-            @truncate(val >> 56), @truncate(val >> 48),
-            @truncate(val >> 40), @truncate(val >> 32),
-            @truncate(val >> 24), @truncate(val >> 16),
-            @truncate(val >> 8),  @truncate(val),
+        try writer.writeAll(&.{
+            prefix | 27,
+            @truncate(val >> 56),
+            @truncate(val >> 48),
+            @truncate(val >> 40),
+            @truncate(val >> 32),
+            @truncate(val >> 24),
+            @truncate(val >> 16),
+            @truncate(val >> 8),
+            @truncate(val),
         });
     }
+}
+
+/// check if map entries are already in DAG-CBOR key order
+fn keysAlreadySorted(entries: []const Value.MapEntry) bool {
+    if (entries.len <= 1) return true;
+    var prev = entries[0].key;
+    for (entries[1..]) |entry| {
+        if (prev.len > entry.key.len) return false;
+        if (prev.len == entry.key.len and std.mem.order(u8, prev, entry.key) != .lt) return false;
+        prev = entry.key;
+    }
+    return true;
 }
 
 /// DAG-CBOR map key ordering: shorter keys first, then lexicographic
 fn dagCborKeyLessThan(_: void, a: Value.MapEntry, b: Value.MapEntry) bool {
     if (a.key.len != b.key.len) return a.key.len < b.key.len;
     return std.mem.order(u8, a.key, b.key) == .lt;
+}
+
+/// write a short text string (< 24 bytes) as a single fused write.
+/// this is the hot path for map keys in AT Protocol records, where keys
+/// are always short ASCII strings. fusing header+payload into one writeAll
+/// halves the writer dispatch count.
+fn writeShortText(writer: anytype, text: []const u8) !void {
+    if (text.len < 24) {
+        var buf: [24]u8 = undefined;
+        buf[0] = 0x60 | @as(u8, @intCast(text.len));
+        @memcpy(buf[1..][0..text.len], text);
+        try writer.writeAll(buf[0 .. 1 + text.len]);
+    } else {
+        try writeArgument(writer, 3, text.len);
+        try writer.writeAll(text);
+    }
 }
 
 /// encode a Value to the given writer in DAG-CBOR format.
@@ -447,10 +490,7 @@ pub fn encode(allocator: Allocator, writer: anytype, value: Value) !void {
             try writeArgument(writer, 2, b.len);
             try writer.writeAll(b);
         },
-        .text => |t| {
-            try writeArgument(writer, 3, t.len);
-            try writer.writeAll(t);
-        },
+        .text => |t| try writeShortText(writer, t),
         .array => |items| {
             try writeArgument(writer, 4, items.len);
             for (items) |item| {
@@ -459,18 +499,33 @@ pub fn encode(allocator: Allocator, writer: anytype, value: Value) !void {
         },
         .map => |entries| {
             try writeArgument(writer, 5, entries.len);
-            // DAG-CBOR: keys sorted by byte length, then lexicographically
-            const sorted = try allocator.dupe(Value.MapEntry, entries);
-            defer allocator.free(sorted);
-            std.mem.sort(Value.MapEntry, sorted, {}, dagCborKeyLessThan);
-            for (sorted) |entry| {
-                try encode(allocator, writer, .{ .text = entry.key });
-                try encode(allocator, writer, entry.value);
+            // DAG-CBOR: keys sorted by byte length, then lexicographically.
+            // three paths: already sorted (common for decoded data), stack sort
+            // for small maps (≤16 entries, covers all AT Protocol records), or
+            // heap sort for rare large maps.
+            if (keysAlreadySorted(entries)) {
+                for (entries) |entry| {
+                    try writeShortText(writer, entry.key);
+                    try encode(allocator, writer, entry.value);
+                }
+            } else if (entries.len <= 16) {
+                var buf: [16]Value.MapEntry = undefined;
+                const sorted = buf[0..entries.len];
+                @memcpy(sorted, entries);
+                std.mem.sort(Value.MapEntry, sorted, {}, dagCborKeyLessThan);
+                for (sorted) |entry| {
+                    try writeShortText(writer, entry.key);
+                    try encode(allocator, writer, entry.value);
+                }
+            } else {
+                const sorted = try allocator.dupe(Value.MapEntry, entries);
+                defer allocator.free(sorted);
+                std.mem.sort(Value.MapEntry, sorted, {}, dagCborKeyLessThan);
+                for (sorted) |entry| {
+                    try writeShortText(writer, entry.key);
+                    try encode(allocator, writer, entry.value);
+                }
             }
-        },
-        .tag => |t| {
-            try writeArgument(writer, 6, t.number);
-            try encode(allocator, writer, t.content.*);
         },
         .boolean => |b| try writer.writeByte(if (b) @as(u8, 0xf5) else @as(u8, 0xf4)),
         .null => try writer.writeByte(0xf6),
@@ -500,6 +555,373 @@ pub fn writeUvarint(writer: anytype, val: u64) !void {
         v >>= 7;
     }
     try writer.writeByte(@as(u8, @truncate(v)));
+}
+
+/// Result of reading a CBOR initial byte and its argument.
+pub const Arg = struct {
+    major: u3,
+    val: u64,
+    end: usize,
+};
+
+/// Read a CBOR initial byte at `pos`, parse the argument value from
+/// additional info + following bytes, and return the major type (high 3 bits),
+/// argument value, and position after the header.
+///
+/// Validates shortest-form encoding (DAG-CBOR requirement).
+/// This is the public, value-semantics equivalent of the internal `readArgument`.
+pub fn readArg(data: []const u8, pos: usize) DecodeError!Arg {
+    if (pos >= data.len) return error.UnexpectedEof;
+    const initial = data[pos];
+    const major: u3 = @truncate(initial >> 5);
+    const additional: u5 = @truncate(initial);
+    var cur = pos + 1;
+    const val: u64 = switch (additional) {
+        0...23 => @as(u64, additional),
+        24 => blk: { // 1-byte
+            if (cur >= data.len) return error.UnexpectedEof;
+            const v = data[cur];
+            cur += 1;
+            if (v < 24) return error.NonMinimalEncoding;
+            break :blk @as(u64, v);
+        },
+        25 => blk: { // 2-byte big-endian
+            if (cur + 2 > data.len) return error.UnexpectedEof;
+            const v = std.mem.readInt(u16, data[cur..][0..2], .big);
+            cur += 2;
+            if (v <= 0xff) return error.NonMinimalEncoding;
+            break :blk @as(u64, v);
+        },
+        26 => blk: { // 4-byte big-endian
+            if (cur + 4 > data.len) return error.UnexpectedEof;
+            const v = std.mem.readInt(u32, data[cur..][0..4], .big);
+            cur += 4;
+            if (v <= 0xffff) return error.NonMinimalEncoding;
+            break :blk @as(u64, v);
+        },
+        27 => blk: { // 8-byte big-endian
+            if (cur + 8 > data.len) return error.UnexpectedEof;
+            const v = std.mem.readInt(u64, data[cur..][0..8], .big);
+            cur += 8;
+            if (v <= 0xffffffff) return error.NonMinimalEncoding;
+            break :blk v;
+        },
+        28, 29, 30 => return error.ReservedAdditionalInfo,
+        31 => return error.IndefiniteLength,
+    };
+    return .{ .major = major, .val = val, .end = cur };
+}
+
+// ---------------------------------------------------------------------------
+// Type-specific readers — zero-copy, no allocator needed
+// ---------------------------------------------------------------------------
+
+pub const SliceResult = struct { val: []const u8, end: usize };
+pub const U64Result = struct { val: u64, end: usize };
+pub const I64Result = struct { val: i64, end: usize };
+pub const BoolResult = struct { val: bool, end: usize };
+
+/// Read a CBOR text string (major type 3) at `pos`.
+/// Validates UTF-8. Returns a zero-copy slice into `data`.
+pub fn readText(data: []const u8, pos: usize) DecodeError!SliceResult {
+    const arg = try readArg(data, pos);
+    if (arg.major != 3) return error.WrongType;
+    const len = std.math.cast(usize, arg.val) orelse return error.UnexpectedEof;
+    const end = std.math.add(usize, arg.end, len) catch return error.UnexpectedEof;
+    if (end > data.len) return error.UnexpectedEof;
+    const text = data[arg.end..end];
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+    return .{ .val = text, .end = end };
+}
+
+/// Read a CBOR byte string (major type 2) at `pos`.
+/// Returns a zero-copy slice into `data`.
+pub fn readBytes(data: []const u8, pos: usize) DecodeError!SliceResult {
+    const arg = try readArg(data, pos);
+    if (arg.major != 2) return error.WrongType;
+    const len = std.math.cast(usize, arg.val) orelse return error.UnexpectedEof;
+    const end = std.math.add(usize, arg.end, len) catch return error.UnexpectedEof;
+    if (end > data.len) return error.UnexpectedEof;
+    return .{ .val = data[arg.end..end], .end = end };
+}
+
+/// Read a CBOR unsigned integer (major type 0) at `pos`.
+pub fn readUint(data: []const u8, pos: usize) DecodeError!U64Result {
+    const arg = try readArg(data, pos);
+    if (arg.major != 0) return error.WrongType;
+    return .{ .val = arg.val, .end = arg.end };
+}
+
+/// Read a CBOR integer (major type 0 or 1) at `pos`.
+/// Major 0 = positive, major 1 = negative (-1 - val).
+/// Returns error.Overflow if a positive value exceeds maxInt(i64).
+pub fn readInt(data: []const u8, pos: usize) DecodeError!I64Result {
+    const arg = try readArg(data, pos);
+    switch (arg.major) {
+        0 => {
+            if (arg.val > @as(u64, @intCast(std.math.maxInt(i64)))) return error.Overflow;
+            return .{ .val = @intCast(arg.val), .end = arg.end };
+        },
+        1 => {
+            // CBOR negative: -1 - val
+            // val can be 0..2^64-1, result is -1..-2^64
+            // i64 can hold down to -2^63, so max raw val is 2^63 - 1
+            if (arg.val > @as(u64, @intCast(std.math.maxInt(i64)))) return error.Overflow;
+            return .{ .val = -1 - @as(i64, @intCast(arg.val)), .end = arg.end };
+        },
+        else => return error.WrongType,
+    }
+}
+
+/// Read a CBOR boolean at `pos`.
+/// 0xf4 = false, 0xf5 = true.
+pub fn readBool(data: []const u8, pos: usize) DecodeError!BoolResult {
+    if (pos >= data.len) return error.UnexpectedEof;
+    return switch (data[pos]) {
+        0xf4 => .{ .val = false, .end = pos + 1 },
+        0xf5 => .{ .val = true, .end = pos + 1 },
+        else => error.WrongType,
+    };
+}
+
+/// Read a CBOR null at `pos`.
+/// 0xf6 = null. Returns position after the null byte.
+pub fn readNull(data: []const u8, pos: usize) DecodeError!usize {
+    if (pos >= data.len) return error.UnexpectedEof;
+    if (data[pos] != 0xf6) return error.WrongType;
+    return pos + 1;
+}
+
+/// Read a CBOR map header (major type 5) at `pos`.
+/// Returns the entry count.
+pub fn readMapHeader(data: []const u8, pos: usize) DecodeError!U64Result {
+    const arg = try readArg(data, pos);
+    if (arg.major != 5) return error.WrongType;
+    return .{ .val = arg.val, .end = arg.end };
+}
+
+/// Read a CBOR array header (major type 4) at `pos`.
+/// Returns the element count.
+pub fn readArrayHeader(data: []const u8, pos: usize) DecodeError!U64Result {
+    const arg = try readArg(data, pos);
+    if (arg.major != 4) return error.WrongType;
+    return .{ .val = arg.val, .end = arg.end };
+}
+
+/// Read a DAG-CBOR CID link at `pos`.
+/// Expects tag(42) followed by a byte string with a 0x00 identity multibase prefix.
+/// Returns the raw CID bytes (after the 0x00 prefix) as a zero-copy slice.
+pub fn readCidLink(data: []const u8, pos: usize) DecodeError!SliceResult {
+    // Read the tag header — must be tag(42)
+    const tag_arg = try readArg(data, pos);
+    if (tag_arg.major != 6 or tag_arg.val != 42) return error.WrongType;
+    // Read the inner byte string
+    const bytes_result = try readBytes(data, tag_arg.end);
+    const payload = bytes_result.val;
+    // Must have 0x00 prefix + at least version byte + codec byte (min 3 bytes)
+    if (payload.len < 3 or payload[0] != 0x00) return error.InvalidCid;
+    return .{ .val = payload[1..], .end = bytes_result.end };
+}
+
+// ---------------------------------------------------------------------------
+// Streaming helpers — skip / peek without full decode
+// ---------------------------------------------------------------------------
+
+/// Skip one CBOR value at `pos` without decoding it. Returns the position
+/// after the skipped value. Iterative (not recursive) using a small stack
+/// for nested containers. Zero allocation.
+pub fn skipValue(data: []const u8, pos: usize) DecodeError!usize {
+    const max_stack = 32;
+    var stack: [max_stack]u64 = undefined;
+    var depth: usize = 0;
+    var cur = pos;
+
+    while (true) {
+        const arg = try readArg(data, cur);
+        cur = arg.end;
+
+        switch (arg.major) {
+            0, 1 => {
+                // integers: header only, nothing to skip after readArg
+            },
+            2, 3 => {
+                // byte string / text string: skip `val` bytes of payload
+                const len = std.math.cast(usize, arg.val) orelse return error.UnexpectedEof;
+                cur = std.math.add(usize, cur, len) catch return error.UnexpectedEof;
+                if (cur > data.len) return error.UnexpectedEof;
+            },
+            4 => {
+                // array: push element count
+                if (arg.val > 0) {
+                    if (depth >= max_stack) return error.MaxDepthExceeded;
+                    stack[depth] = arg.val;
+                    depth += 1;
+                    continue; // don't decrement — we haven't consumed an element yet
+                }
+            },
+            5 => {
+                // map: push key+value count (2 per entry)
+                if (arg.val > 0) {
+                    if (depth >= max_stack) return error.MaxDepthExceeded;
+                    stack[depth] = std.math.mul(u64, arg.val, 2) catch return error.Overflow;
+                    depth += 1;
+                    continue;
+                }
+            },
+            6 => {
+                // tag: the tagged value follows immediately — loop to read it
+                // don't push anything, don't decrement
+                continue;
+            },
+            7 => {
+                // simple/float: header only
+            },
+        }
+
+        // After consuming a value, unwind the stack
+        while (depth > 0) {
+            stack[depth - 1] -= 1;
+            if (stack[depth - 1] > 0) break;
+            depth -= 1;
+        }
+
+        if (depth == 0) return cur;
+    }
+}
+
+/// Peek at the "$type" field in a DAG-CBOR map without full decode.
+/// Returns the type string (zero-copy slice) or null if not found.
+pub fn peekType(data: []const u8) DecodeError!?[]const u8 {
+    return peekTypeAt(data, 0);
+}
+
+/// Peek at the "$type" field starting from a given position.
+pub fn peekTypeAt(data: []const u8, pos: usize) DecodeError!?[]const u8 {
+    const map_header = try readArg(data, pos);
+    if (map_header.major != 5) return null;
+
+    var cur = map_header.end;
+    const count = map_header.val;
+
+    const safe_count = std.math.cast(usize, count) orelse return null;
+    for (0..safe_count) |_| {
+        // Read key — DAG-CBOR keys are always text strings
+        const key = readText(data, cur) catch return null;
+        cur = key.end;
+
+        if (std.mem.eql(u8, key.val, "$type")) {
+            // Read the value as text
+            const val = readText(data, cur) catch return null;
+            return val.val;
+        }
+
+        // Skip the value
+        cur = try skipValue(data, cur);
+    }
+
+    return null;
+}
+
+// === low-level write API ===
+
+/// Write CBOR initial byte + argument using shortest encoding.
+/// Returns new position after written bytes. Caller must ensure buf is large enough.
+pub fn writeArg(buf: []u8, pos: usize, major: u3, val: u64) usize {
+    const prefix: u8 = @as(u8, major) << 5;
+    if (val < 24) {
+        buf[pos] = prefix | @as(u8, @intCast(val));
+        return pos + 1;
+    } else if (val <= 0xff) {
+        buf[pos] = prefix | 24;
+        buf[pos + 1] = @intCast(val);
+        return pos + 2;
+    } else if (val <= 0xffff) {
+        buf[pos] = prefix | 25;
+        const v: u16 = @intCast(val);
+        buf[pos + 1] = @truncate(v >> 8);
+        buf[pos + 2] = @truncate(v);
+        return pos + 3;
+    } else if (val <= 0xffffffff) {
+        buf[pos] = prefix | 26;
+        const v: u32 = @intCast(val);
+        buf[pos + 1] = @truncate(v >> 24);
+        buf[pos + 2] = @truncate(v >> 16);
+        buf[pos + 3] = @truncate(v >> 8);
+        buf[pos + 4] = @truncate(v);
+        return pos + 5;
+    } else {
+        buf[pos] = prefix | 27;
+        buf[pos + 1] = @truncate(val >> 56);
+        buf[pos + 2] = @truncate(val >> 48);
+        buf[pos + 3] = @truncate(val >> 40);
+        buf[pos + 4] = @truncate(val >> 32);
+        buf[pos + 5] = @truncate(val >> 24);
+        buf[pos + 6] = @truncate(val >> 16);
+        buf[pos + 7] = @truncate(val >> 8);
+        buf[pos + 8] = @truncate(val);
+        return pos + 9;
+    }
+}
+
+/// Write CBOR text string header + payload.
+pub fn writeText(buf: []u8, pos: usize, text: []const u8) usize {
+    const p = writeArg(buf, pos, 3, text.len);
+    @memcpy(buf[p..][0..text.len], text);
+    return p + text.len;
+}
+
+/// Write CBOR byte string header + payload.
+pub fn writeBytes(buf: []u8, pos: usize, bytes: []const u8) usize {
+    const p = writeArg(buf, pos, 2, bytes.len);
+    @memcpy(buf[p..][0..bytes.len], bytes);
+    return p + bytes.len;
+}
+
+/// Write unsigned integer (major 0).
+pub fn writeUint(buf: []u8, pos: usize, val: u64) usize {
+    return writeArg(buf, pos, 0, val);
+}
+
+/// Write signed integer. Positive values use major 0, negative values use major 1.
+pub fn writeInt(buf: []u8, pos: usize, val: i64) usize {
+    if (val >= 0) {
+        return writeArg(buf, pos, 0, @intCast(val));
+    } else {
+        const raw: u64 = @intCast(-1 - val);
+        return writeArg(buf, pos, 1, raw);
+    }
+}
+
+/// Write map header (major 5).
+pub fn writeMapHeader(buf: []u8, pos: usize, count: usize) usize {
+    return writeArg(buf, pos, 5, count);
+}
+
+/// Write array header (major 4).
+pub fn writeArrayHeader(buf: []u8, pos: usize, count: usize) usize {
+    return writeArg(buf, pos, 4, count);
+}
+
+/// Write boolean: 0xf5 (true) or 0xf4 (false).
+pub fn writeBool(buf: []u8, pos: usize, val: bool) usize {
+    buf[pos] = if (val) 0xf5 else 0xf4;
+    return pos + 1;
+}
+
+/// Write null: 0xf6.
+pub fn writeNull(buf: []u8, pos: usize) usize {
+    buf[pos] = 0xf6;
+    return pos + 1;
+}
+
+/// Write tag(42) + byte string with 0x00 prefix + CID raw bytes.
+pub fn writeCidLink(buf: []u8, pos: usize, cid_raw: []const u8) usize {
+    var p = writeArg(buf, pos, 6, 42);
+    p = writeArg(buf, p, 2, 1 + cid_raw.len);
+    buf[p] = 0x00;
+    p += 1;
+    @memcpy(buf[p..][0..cid_raw.len], cid_raw);
+    return p + cid_raw.len;
 }
 
 // === tests ===
@@ -601,11 +1023,11 @@ test "decode nested map" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    // {"op": 1, "t": "#commit"}
+    // {"t": "#commit", "op": 1} — sorted by key length (1 < 2)
     const result = try decode(alloc, &.{
         0xa2, // map(2)
-        0x62, 'o', 'p', 0x01, // "op": 1
         0x61, 't', 0x67, '#', 'c', 'o', 'm', 'm', 'i', 't', // "t": "#commit"
+        0x62, 'o', 'p', 0x01, // "op": 1
     });
     const val = result.value;
     try std.testing.expectEqual(@as(u64, 1), val.get("op").?.unsigned);
@@ -643,9 +1065,9 @@ test "Value helper methods" {
 
     const result = try decode(alloc, &.{
         0xa3, // map(3)
-        0x64, 'n', 'a', 'm', 'e', 0x65, 'a', 'l', 'i', 'c', 'e', // "name": "alice"
-        0x63, 'a', 'g', 'e', 0x18, 30, // "age": 30
-        0x66, 'a', 'c', 't', 'i', 'v', 'e', 0xf5, // "active": true
+        0x63, 'a', 'g', 'e', 0x18, 30, // "age": 30  (3 bytes, shortest)
+        0x64, 'n', 'a', 'm', 'e', 0x65, 'a', 'l', 'i', 'c', 'e', // "name": "alice" (4 bytes)
+        0x66, 'a', 'c', 't', 'i', 'v', 'e', 0xf5, // "active": true (6 bytes)
     });
     const val = result.value;
     try std.testing.expectEqualStrings("alice", val.getString("name").?);

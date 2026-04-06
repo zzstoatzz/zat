@@ -6,3 +6,6 @@ zig-pkg/
 
 # Wisp docs build output (generated)
 site-out/
+
+# Plans
+docs/

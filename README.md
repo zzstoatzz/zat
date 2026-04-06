@@ -16,7 +16,7 @@ zat publishes these docs as [`site.standard.document`](https://standard.site) re
 requires zig 0.16+.
 
 ```bash
-zig fetch --save https://tangled.sh/zat.dev/zat/archive/main
+zig fetch --save https://tangled.org/zat.dev/zat/archive/main
 ```
 
 then in `build.zig`:
@@ -273,9 +273,9 @@ const post = try zat.json.extractAt(FeedPost, allocator, value, .{"post"});
 
 ## benchmarks
 
-zat is benchmarked against Go (indigo), Rust (rsky), and Python (atproto) in [atproto-bench](https://tangled.sh/@zzstoatzz.io/atproto-bench):
+zat is benchmarked against Go (indigo), Rust (rsky), and Python (atproto) in [atproto-bench](https://tangled.org/zzstoatzz.io/atproto-bench):
 
-- **decode**: 290k frames/sec (zig) vs 39k (rust) vs 15k (go) — with CID hash verification
+- **decode**: 202k frames/sec (zig) vs 39k (rust) vs 15k (go) — with CID hash verification and full CBOR validation
 - **sig-verify**: 15k–19k verifies/sec across all three — ECDSA is table stakes
 - **trust chain**: full repo verification in ~300ms compute (zig) vs ~410ms (go) vs ~422ms (rust)
 

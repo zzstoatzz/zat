@@ -288,9 +288,12 @@ fn signEcdsa(comptime Scheme: type, comptime Curve: type, comptime half_order: [
 /// verify an ECDSA signature, rejecting high-S
 fn verifyEcdsa(comptime Scheme: type, comptime half_order: [32]u8, message: []const u8, sig_bytes: []const u8, public_key_raw: []const u8) !void {
     if (sig_bytes.len != 64) return error.InvalidSignature;
-    const sig = Scheme.Signature.fromBytes(sig_bytes[0..64].*);
 
-    rejectHighS(half_order, sig.s) catch return error.SignatureVerificationFailed;
+    // reject high-S before constructing Signature — fromBytes does scalar
+    // arithmetic that can overflow on out-of-range values
+    rejectHighS(half_order, sig_bytes[32..64].*) catch return error.SignatureVerificationFailed;
+
+    const sig = Scheme.Signature.fromBytes(sig_bytes[0..64].*);
 
     if (public_key_raw.len != 33) return error.InvalidPublicKey;
     const public_key = Scheme.PublicKey.fromSec1(public_key_raw) catch return error.InvalidPublicKey;
