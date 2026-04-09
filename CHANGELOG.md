@@ -5,6 +5,7 @@
 - **breaking**: zig 0.16 — all networking APIs take `io: std.Io` as first parameter
 - **breaking**: streaming clients use `subscribe(handler)` pattern instead of `connect()` + `next()` loop
 - **breaking**: websocket.zig bumped — Io-native server accept loop, client write lock, TLS stream support
+- **fix**: `DidResolver.resolve` and `HttpTransport.fetch` propagate the underlying `std.http.Client.fetch` error instead of collapsing every transport-layer failure (DNS, connect, TLS) to `error.DidResolutionFailed` / `error.RequestFailed` — callers can distinguish failure modes via `@errorName(err)`. soft-breaking: the inferred error set widens
 - **feat**: `Io.Timestamp` replaces libc `gettimeofday` in JWT/OAuth
 - **feat**: `io.sleep()` replaces libc `nanosleep` in reconnect backoff (cancellation-aware)
 - **docs**: [devlog 008](devlog/008-the-io-migration.md) — the 0.16 migration

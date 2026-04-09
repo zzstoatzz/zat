@@ -59,7 +59,7 @@ pub const HttpTransport = struct {
             }
         }
 
-        const result = self.http_client.fetch(.{
+        const result = try self.http_client.fetch(.{
             .location = .{ .url = options.url },
             .response_writer = &aw.writer,
             .method = options.method,
@@ -67,7 +67,7 @@ pub const HttpTransport = struct {
             .headers = headers,
             .extra_headers = extra_buf[0..extra_count],
             .keep_alive = self.keep_alive,
-        }) catch return error.RequestFailed;
+        });
 
         return .{
             .status = result.status,

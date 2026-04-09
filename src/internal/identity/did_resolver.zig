@@ -95,7 +95,7 @@ pub const DidResolver = struct {
 
     /// fetch and parse a did document from url
     fn fetchDidDocument(self: *DidResolver, url: []const u8) !DidDocument {
-        const result = self.transport.fetch(.{ .url = url }) catch return error.DidResolutionFailed;
+        const result = try self.transport.fetch(.{ .url = url });
         defer self.allocator.free(result.body);
 
         if (result.status != .ok) {
@@ -139,6 +139,39 @@ test "resolve did:plc - leak check (no arena)" {
     defer doc.deinit();
 
     try std.testing.expectEqualStrings("did:plc:z72i7hdynmk6r22z27h6tvur", doc.id);
+}
+
+test "regression: transport errors propagate distinct kinds" {
+    // before this fix, transport.fetch had `catch return error.RequestFailed`
+    // and fetchDidDocument had `catch return error.DidResolutionFailed`, so
+    // every transport-layer failure (DNS, TCP, TLS) collapsed to one
+    // indistinguishable error and callers had no way to see what was wrong.
+    // this regression test asserts the underlying error kind survives the
+    // resolver layer for at least one common transport failure mode.
+    //
+    // history: zlay 2026-04-08, where the host_authority pool failed at 100%
+    // and we had no production telemetry on which transport error fired
+    // because both layers had been swallowed. see relay docs/zlay-external-
+    // review-2026-04-09.md.
+    var resolver = DidResolver.init(std.Options.debug_io, std.testing.allocator);
+    defer resolver.deinit();
+
+    // 127.0.0.1:443 is almost certainly not listening on a test machine.
+    // did:web:127.0.0.1 → https://127.0.0.1/.well-known/did.json → connect refused.
+    const did = Did.parse("did:web:127.0.0.1") orelse return error.SkipZigTest;
+    if (resolver.resolve(did)) |doc| {
+        // someone is actually serving a DID doc on 127.0.0.1:443 — skip rather
+        // than fail, since the assertion below assumes a transport failure
+        var d = doc;
+        d.deinit();
+        return error.SkipZigTest;
+    } else |err| {
+        // exact error name varies by platform (ConnectionRefused on linux/darwin,
+        // possibly different elsewhere). just assert it's not the catch-all that
+        // the pre-fix code returned for everything.
+        try std.testing.expect(err != error.DidResolutionFailed);
+        try std.testing.expect(err != error.RequestFailed);
+    }
 }
 
 test "did:web url construction" {
