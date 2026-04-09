@@ -148,6 +148,122 @@ pub fn readWithOptions(allocator: Allocator, data: []const u8, options: ReadOpti
     };
 }
 
+// === streaming iterator ===
+
+/// a single block yielded by BlockIterator. slices borrow from the input
+/// buffer and stay valid for the iterator's entire lifetime (the iterator
+/// never overwrites input data).
+pub const BlockEntry = struct {
+    cid_raw: []const u8,
+    data: []const u8,
+};
+
+/// pull-style iterator over CAR blocks. yields one block per `next()` call
+/// and does zero allocation in the hot path — no hashmap, no block list.
+/// caller picks what to remember (CID → offset index, MST nodes only, etc.).
+///
+/// blocks are slices into the original input buffer, so this is strictly
+/// cheaper than `read()` for streaming walks where random access isn't
+/// required upfront.
+pub const BlockIterator = struct {
+    data: []const u8,
+    pos: usize,
+    verify: bool,
+    max_per_block: usize,
+
+    pub fn next(self: *BlockIterator) CarError!?BlockEntry {
+        if (self.pos >= self.data.len) return null;
+
+        const block_len = cbor.readUvarint(self.data, &self.pos) orelse return error.InvalidVarint;
+        const block_len_usize = std.math.cast(usize, block_len) orelse return error.InvalidHeader;
+        if (block_len_usize == 0) return error.InvalidCid;
+        if (block_len_usize > self.max_per_block) return error.BlockTooLarge;
+        const block_end = self.pos + block_len_usize;
+        if (block_end > self.data.len) return error.UnexpectedEof;
+
+        const block_data = self.data[self.pos..block_end];
+        const cid_len = cidLength(block_data) orelse return error.InvalidCid;
+        if (cid_len > block_data.len) return error.InvalidCid;
+
+        const cid_bytes = block_data[0..cid_len];
+        const content = block_data[cid_len..];
+
+        if (self.verify) try verifyBlockHash(cid_bytes, content);
+
+        self.pos = block_end;
+        return .{ .cid_raw = cid_bytes, .data = content };
+    }
+
+    /// byte offset within the original input of the next block to be read.
+    /// useful for building a CID → offset index while iterating.
+    pub fn offset(self: BlockIterator) usize {
+        return self.pos;
+    }
+};
+
+pub const StreamOptions = struct {
+    verify_block_hashes: bool = true,
+    /// max total CAR size in bytes. null = use default (2 MB). for a
+    /// trusted response you fetched yourself, pass `data.len` to disable.
+    max_size: ?usize = null,
+    /// max size of any single block. null = use default (1 MB).
+    max_block_size: ?usize = null,
+};
+
+pub const StreamResult = struct {
+    roots: []const cbor.Cid,
+    iter: BlockIterator,
+};
+
+/// parse only the CAR header and return an iterator over the remaining
+/// blocks. unlike `read`, this does not build a hashmap or collect a
+/// `Block[]` — it's O(1) space beyond the input buffer. zero-copy: the
+/// iterator yields slices into `data`.
+///
+/// the caller owns `result.roots` (backed by `allocator`) and should free
+/// it via `allocator.free(result.roots)` when done. the iterator itself
+/// holds no allocations.
+pub fn streamBlocks(allocator: Allocator, data: []const u8, options: StreamOptions) CarError!StreamResult {
+    if (data.len > (options.max_size orelse max_blocks_size)) return error.BlocksTooLarge;
+
+    var pos: usize = 0;
+
+    const header_len = cbor.readUvarint(data, &pos) orelse return error.InvalidVarint;
+    const header_len_usize = std.math.cast(usize, header_len) orelse return error.InvalidHeader;
+    const header_end = pos + header_len_usize;
+    if (header_end > data.len) return error.UnexpectedEof;
+
+    // decode header into a throwaway arena — we only need the roots array,
+    // which we deep-copy (via cbor.Cid.raw slices pointing into `data`).
+    var header_arena = std.heap.ArenaAllocator.init(allocator);
+    defer header_arena.deinit();
+    const header = cbor.decodeAll(header_arena.allocator(), data[pos..header_end]) catch return error.InvalidHeader;
+
+    const version = header.getUint("version") orelse return error.InvalidHeader;
+    if (version != 1) return error.InvalidHeader;
+
+    var roots: std.ArrayList(cbor.Cid) = .empty;
+    errdefer roots.deinit(allocator);
+    const root_values = header.getArray("roots") orelse return error.InvalidHeader;
+    for (root_values) |root_val| {
+        switch (root_val) {
+            .cid => |c| try roots.append(allocator, c),
+            else => return error.InvalidHeader,
+        }
+    }
+    if (roots.items.len == 0) return error.InvalidHeader;
+
+    return .{
+        .roots = try roots.toOwnedSlice(allocator),
+        .iter = .{
+            .data = data,
+            .pos = header_end,
+            .verify = options.verify_block_hashes,
+            .max_per_block = options.max_block_size orelse max_block_size,
+        },
+    };
+}
+
 /// verify that block content hashes to the digest in its CID
 fn verifyBlockHash(cid_bytes: []const u8, content: []const u8) CarError!void {
     const cid = cbor.Cid{ .raw = cid_bytes };
@@ -421,4 +537,140 @@ test "read rejects block with bad hash" {
 test "findBlock returns null for missing CID" {
     const c = Car{ .roots = &.{}, .blocks = &.{} };
     try std.testing.expect(findBlock(c, "nonexistent") == null);
+}
+
+test "streamBlocks matches read output" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // build a CAR with a handful of real DAG-CBOR blocks so the iterator has
+    // something non-trivial to chew on
+    const b1 = try cbor.encodeAlloc(alloc, .{ .map = &.{.{ .key = "k", .value = .{ .text = "v1" } }} });
+    const b2 = try cbor.encodeAlloc(alloc, .{ .map = &.{.{ .key = "k", .value = .{ .text = "v2" } }} });
+    const b3 = try cbor.encodeAlloc(alloc, .{ .map = &.{.{ .key = "k", .value = .{ .text = "v3" } }} });
+    const c1 = try cbor.Cid.forDagCbor(alloc, b1);
+    const c2 = try cbor.Cid.forDagCbor(alloc, b2);
+    const c3 = try cbor.Cid.forDagCbor(alloc, b3);
+
+    const src = Car{
+        .roots = &.{c1},
+        .blocks = &.{
+            .{ .cid_raw = c1.raw, .data = b1 },
+            .{ .cid_raw = c2.raw, .data = b2 },
+            .{ .cid_raw = c3.raw, .data = b3 },
+        },
+    };
+    const car_bytes = try writeAlloc(alloc, src);
+
+    // reference: full read
+    const parsed = try read(alloc, car_bytes);
+
+    // streaming: should see every block in order, with identical bytes
+    var stream = try streamBlocks(alloc, car_bytes, .{});
+    defer alloc.free(stream.roots);
+
+    try std.testing.expectEqual(@as(usize, 1), stream.roots.len);
+    try std.testing.expectEqualSlices(u8, parsed.roots[0].raw, stream.roots[0].raw);
+
+    var i: usize = 0;
+    while (try stream.iter.next()) |block| : (i += 1) {
+        try std.testing.expect(i < parsed.blocks.len);
+        try std.testing.expectEqualSlices(u8, parsed.blocks[i].cid_raw, block.cid_raw);
+        try std.testing.expectEqualSlices(u8, parsed.blocks[i].data, block.data);
+    }
+    try std.testing.expectEqual(parsed.blocks.len, i);
+}
+
+// stress test: iterate pfrazee.com's CAR via streamBlocks and compare
+// against the full `read` path. gated on ZAT_STRESS=1 and expects the
+// CAR cached at /tmp/pfrazee.car (fetch once via curl — see ken's
+// streaming CAR notes). not in CI: too slow, requires network fetch.
+test "streamBlocks: pfrazee.com stress" {
+    const stress_c = std.c.getenv("ZAT_STRESS") orelse return;
+    const stress = std.mem.span(stress_c);
+    if (!std.mem.eql(u8, stress, "1")) return;
+
+    const io = std.Options.debug_io;
+    const file = std.Io.Dir.openFileAbsolute(io, "/tmp/pfrazee.car", .{}) catch |err| {
+        std.debug.print("pfrazee.car not found ({t}) — skip. fetch via:\n", .{err});
+        std.debug.print("  curl -L -o /tmp/pfrazee.car 'https://bsky.network/xrpc/com.atproto.sync.getRepo?did=did:plc:ragtjsm2j2vknwkz3zp4oxrd'\n", .{});
+        return;
+    };
+    defer file.close(io);
+
+    const file_len = try file.length(io);
+    var mmap = try std.Io.File.MemoryMap.create(io, file, .{
+        .len = @intCast(file_len),
+        .protection = .{ .read = true, .write = false },
+        .offset = 0,
+    });
+    defer mmap.destroy(io);
+    const bytes: []const u8 = mmap.memory[0..@intCast(file_len)];
+
+    std.debug.print("\npfrazee CAR: {d:.2} MB (mmap'd)\n", .{@as(f64, @floatFromInt(bytes.len)) / (1024.0 * 1024.0)});
+
+    // --- streaming path: iterate blocks, accumulate a few invariants ---
+    var stream = try streamBlocks(std.testing.allocator, bytes, .{
+        .verify_block_hashes = true,
+        .max_size = bytes.len,
+    });
+    defer std.testing.allocator.free(stream.roots);
+
+    var stream_block_count: usize = 0;
+    var stream_total_bytes: usize = 0;
+    var stream_cid_xor: u8 = 0;
+    while (try stream.iter.next()) |block| {
+        stream_block_count += 1;
+        stream_total_bytes += block.data.len;
+        for (block.cid_raw) |b| stream_cid_xor ^= b;
+    }
+
+    // --- reference path: full read (builds hashmap) ---
+    var ref_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ref_arena.deinit();
+    const ref = try readWithOptions(ref_arena.allocator(), bytes, .{
+        .verify_block_hashes = true,
+        .max_size = bytes.len,
+        .max_blocks = bytes.len,
+    });
+
+    var ref_total_bytes: usize = 0;
+    var ref_cid_xor: u8 = 0;
+    for (ref.blocks) |block| {
+        ref_total_bytes += block.data.len;
+        for (block.cid_raw) |b| ref_cid_xor ^= b;
+    }
+
+    std.debug.print(
+        "stream:  {d:>8} blocks, {d:>10} bytes, xor=0x{x:0>2}\n",
+        .{ stream_block_count, stream_total_bytes, stream_cid_xor },
+    );
+    std.debug.print(
+        "read:    {d:>8} blocks, {d:>10} bytes, xor=0x{x:0>2}\n",
+        .{ ref.blocks.len, ref_total_bytes, ref_cid_xor },
+    );
+
+    try std.testing.expectEqual(ref.blocks.len, stream_block_count);
+    try std.testing.expectEqual(ref_total_bytes, stream_total_bytes);
+    try std.testing.expectEqual(ref_cid_xor, stream_cid_xor);
+}
+
+test "streamBlocks rejects corrupted block with verify on" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const real = try cbor.encodeAlloc(alloc, .{ .map = &.{.{ .key = "k", .value = .{ .text = "original" } }} });
+    const cid = try cbor.Cid.forDagCbor(alloc, real);
+
+    const tampered = Car{
+        .roots = &.{cid},
+        .blocks = &.{.{ .cid_raw = cid.raw, .data = "tampered" }},
+    };
+    const car_bytes = try writeAlloc(alloc, tampered);
+
+    var stream = try streamBlocks(alloc, car_bytes, .{});
+    defer alloc.free(stream.roots);
+    try std.testing.expectError(error.BadBlockHash, stream.iter.next());
 }

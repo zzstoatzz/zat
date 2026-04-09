@@ -8,6 +8,7 @@
 - **fix**: `DidResolver.resolve` and `HttpTransport.fetch` propagate the underlying `std.http.Client.fetch` error instead of collapsing every transport-layer failure (DNS, connect, TLS) to `error.DidResolutionFailed` / `error.RequestFailed` — callers can distinguish failure modes via `@errorName(err)`. soft-breaking: the inferred error set widens
 - **feat**: `Io.Timestamp` replaces libc `gettimeofday` in JWT/OAuth
 - **feat**: `io.sleep()` replaces libc `nanosleep` in reconnect backoff (cancellation-aware)
+- **feat**: `car.streamBlocks` + `BlockIterator` — pull-style, zero-allocation CAR iteration for large repos (sync.getRepo). shares parser helpers with `read`/`readWithOptions`; yields slices into the input buffer and exposes `offset()` so callers can build their own CID → byte-offset index. strictly additive, no existing consumers affected. pass `max_size = data.len` for sync.getRepo responses — the 2 MB default targets firehose frames.
 - **docs**: [devlog 008](devlog/008-the-io-migration.md) — the 0.16 migration
 
 ## 0.2.18
