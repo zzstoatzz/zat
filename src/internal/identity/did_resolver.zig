@@ -8,6 +8,9 @@ const std = @import("std");
 const Did = @import("../syntax/did.zig").Did;
 const DidDocument = @import("did_document.zig").DidDocument;
 const HttpTransport = @import("../xrpc/transport.zig").HttpTransport;
+const network_safety = @import("network_safety.zig");
+
+const max_did_document_size = 1 * 1024 * 1024;
 
 pub const DidResolver = struct {
     allocator: std.mem.Allocator,
@@ -15,6 +18,8 @@ pub const DidResolver = struct {
 
     /// plc directory url (default: https://plc.directory)
     plc_url: []const u8 = "https://plc.directory",
+    /// DoH endpoint for did:web host safety preflight.
+    doh_endpoint: []const u8 = "https://cloudflare-dns.com/dns-query",
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator) DidResolver {
         return initWithOptions(io, allocator, .{});
@@ -52,7 +57,7 @@ pub const DidResolver = struct {
         const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.plc_url, did.raw });
         defer self.allocator.free(url);
 
-        return try self.fetchDidDocument(url);
+        return try self.fetchDidDocument(url, null);
     }
 
     /// resolve did:web via .well-known
@@ -90,12 +95,28 @@ pub const DidResolver = struct {
             try url_buf.appendSlice(self.allocator, "/did.json");
         }
 
-        return try self.fetchDidDocument(url_buf.items);
+        var checked_url = try network_safety.resolveIdentityUrl(
+            self.allocator,
+            &self.transport,
+            self.doh_endpoint,
+            url_buf.items,
+        );
+        defer checked_url.deinit(self.allocator);
+        return try self.fetchDidDocument(url_buf.items, checked_url.resolvedConnection());
     }
 
     /// fetch and parse a did document from url
-    fn fetchDidDocument(self: *DidResolver, url: []const u8) !DidDocument {
-        const result = try self.transport.fetch(.{ .url = url });
+    fn fetchDidDocument(
+        self: *DidResolver,
+        url: []const u8,
+        resolved_connection: ?HttpTransport.ResolvedConnection,
+    ) !DidDocument {
+        const result = try self.transport.fetch(.{
+            .url = url,
+            .max_response_size = max_did_document_size,
+            .redirect_behavior = .not_allowed,
+            .resolved_connection = resolved_connection,
+        });
         defer self.allocator.free(result.body);
 
         if (result.status != .ok) {
@@ -141,37 +162,12 @@ test "resolve did:plc - leak check (no arena)" {
     try std.testing.expectEqualStrings("did:plc:z72i7hdynmk6r22z27h6tvur", doc.id);
 }
 
-test "regression: transport errors propagate distinct kinds" {
-    // before this fix, transport.fetch had `catch return error.RequestFailed`
-    // and fetchDidDocument had `catch return error.DidResolutionFailed`, so
-    // every transport-layer failure (DNS, TCP, TLS) collapsed to one
-    // indistinguishable error and callers had no way to see what was wrong.
-    // this regression test asserts the underlying error kind survives the
-    // resolver layer for at least one common transport failure mode.
-    //
-    // history: zlay 2026-04-08, where the host_authority pool failed at 100%
-    // and we had no production telemetry on which transport error fired
-    // because both layers had been swallowed. see relay docs/zlay-external-
-    // review-2026-04-09.md.
+test "did:web loopback host is rejected before fetch" {
     var resolver = DidResolver.init(std.Options.debug_io, std.testing.allocator);
     defer resolver.deinit();
 
-    // 127.0.0.1:443 is almost certainly not listening on a test machine.
-    // did:web:127.0.0.1 → https://127.0.0.1/.well-known/did.json → connect refused.
     const did = Did.parse("did:web:127.0.0.1") orelse return error.SkipZigTest;
-    if (resolver.resolve(did)) |doc| {
-        // someone is actually serving a DID doc on 127.0.0.1:443 — skip rather
-        // than fail, since the assertion below assumes a transport failure
-        var d = doc;
-        d.deinit();
-        return error.SkipZigTest;
-    } else |err| {
-        // exact error name varies by platform (ConnectionRefused on linux/darwin,
-        // possibly different elsewhere). just assert it's not the catch-all that
-        // the pre-fix code returned for everything.
-        try std.testing.expect(err != error.DidResolutionFailed);
-        try std.testing.expect(err != error.RequestFailed);
-    }
+    try std.testing.expectError(error.UnsafeIdentityHost, resolver.resolve(did));
 }
 
 test "did:web url construction" {

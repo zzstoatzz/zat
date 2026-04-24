@@ -3,8 +3,8 @@
 //! resolves AT Protocol handles via HTTP:
 //! https://{handle}/.well-known/atproto-did
 //!
-//! note: DNS TXT resolution (_atproto.{handle}) not yet implemented
-//! as zig std doesn't provide TXT record lookup.
+//! DNS TXT resolution uses DNS-over-HTTPS because Zig stdlib does not expose
+//! direct TXT lookup.
 //!
 //! see: https://atproto.com/specs/handle
 
@@ -12,6 +12,10 @@ const std = @import("std");
 const Handle = @import("../syntax/handle.zig").Handle;
 const Did = @import("../syntax/did.zig").Did;
 const HttpTransport = @import("../xrpc/transport.zig").HttpTransport;
+const network_safety = @import("network_safety.zig");
+
+const max_handle_response_size = 8 * 1024;
+const max_dns_txt_response_size = 1 * 1024 * 1024;
 
 pub const HandleResolver = struct {
     allocator: std.mem.Allocator,
@@ -34,8 +38,9 @@ pub const HandleResolver = struct {
     pub fn resolve(self: *HandleResolver, handle: Handle) ![]const u8 {
         if (self.resolveHttp(handle)) |did| {
             return did;
-        } else |_| {
-            return try self.resolveDns(handle);
+        } else |err| switch (err) {
+            error.UnsafeIdentityHost => return err,
+            else => return try self.resolveDns(handle),
         }
     }
 
@@ -48,7 +53,24 @@ pub const HandleResolver = struct {
         );
         defer self.allocator.free(url);
 
-        const result = self.transport.fetch(.{ .url = url }) catch return error.HttpResolutionFailed;
+        var checked_url = network_safety.resolveIdentityUrl(
+            self.allocator,
+            &self.transport,
+            self.doh_endpoint,
+            url,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            error.UnsafeIdentityHost => |e| return e,
+            else => return error.HttpResolutionFailed,
+        };
+        defer checked_url.deinit(self.allocator);
+
+        const result = self.transport.fetch(.{
+            .url = url,
+            .max_response_size = max_handle_response_size,
+            .redirect_behavior = .not_allowed,
+            .resolved_connection = checked_url.resolvedConnection(),
+        }) catch return error.HttpResolutionFailed;
         defer self.allocator.free(result.body);
 
         if (result.status != .ok) {
@@ -85,6 +107,8 @@ pub const HandleResolver = struct {
         const result = self.transport.fetch(.{
             .url = url,
             .accept = "application/dns-json",
+            .max_response_size = max_dns_txt_response_size,
+            .redirect_behavior = .not_allowed,
         }) catch return error.DnsResolutionFailed;
         defer self.allocator.free(result.body);
 
