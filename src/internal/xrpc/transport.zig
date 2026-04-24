@@ -60,49 +60,40 @@ pub const HttpTransport = struct {
             return try self.fetchResolved(options, resolved, headers, extra_buf[0..extra_count]);
         }
 
-        if (options.max_response_size) |max| {
-            const body_buf = try self.allocator.alloc(u8, max);
-            defer self.allocator.free(body_buf);
-            var writer = std.Io.Writer.fixed(body_buf);
+        return try self.fetchUrl(options, headers, extra_buf[0..extra_count]);
+    }
 
-            const result = self.http_client.fetch(.{
-                .location = .{ .url = options.url },
-                .response_writer = &writer,
-                .method = options.method,
-                .payload = options.payload,
-                .headers = headers,
-                .extra_headers = extra_buf[0..extra_count],
-                .keep_alive = self.keep_alive,
-                .redirect_behavior = options.redirect_behavior,
-            }) catch |err| switch (err) {
-                error.WriteFailed => return error.ResponseTooLarge,
-                else => |e| return e,
-            };
+    fn fetchUrl(
+        self: *HttpTransport,
+        options: FetchOptions,
+        headers: std.http.Client.Request.Headers,
+        extra_headers: []const std.http.Header,
+    ) !FetchResult {
+        const uri = try std.Uri.parse(options.url);
+        const redirect_behavior = redirectBehavior(options);
+        var request = try self.http_client.request(options.method, uri, .{
+            .headers = headers,
+            .extra_headers = extra_headers,
+            .keep_alive = self.keep_alive,
+            .redirect_behavior = redirect_behavior,
+        });
+        defer request.deinit();
 
-            return .{
-                .status = result.status,
-                .body = try self.allocator.dupe(u8, writer.buffered()),
-            };
+        if (options.payload) |payload| {
+            request.transfer_encoding = .{ .content_length = payload.len };
+            var body = try request.sendBodyUnflushed(&.{});
+            try body.writer.writeAll(payload);
+            try body.end();
+            try request.connection.?.flush();
+        } else {
+            try request.sendBodiless();
         }
 
-        var aw: std.Io.Writer.Allocating = .init(self.allocator);
-        defer aw.deinit();
+        const redirect_buffer = try self.allocRedirectBuffer(redirect_behavior);
+        defer self.freeRedirectBuffer(redirect_buffer, redirect_behavior);
 
-        const result = try self.http_client.fetch(.{
-            .location = .{ .url = options.url },
-            .response_writer = &aw.writer,
-            .method = options.method,
-            .payload = options.payload,
-            .headers = headers,
-            .extra_headers = extra_buf[0..extra_count],
-            .keep_alive = self.keep_alive,
-            .redirect_behavior = options.redirect_behavior,
-        });
-
-        return .{
-            .status = result.status,
-            .body = try self.allocator.dupe(u8, aw.written()),
-        };
+        var response = try request.receiveHead(redirect_buffer);
+        return try self.readFetchResult(options, &response);
     }
 
     fn fetchResolved(
@@ -130,12 +121,13 @@ pub const HttpTransport = struct {
             .proxied_host = logical_host,
         });
 
+        const redirect_behavior = redirectBehavior(options);
         var request = self.http_client.request(options.method, uri, .{
             .connection = connection,
             .headers = headers,
             .extra_headers = extra_headers,
             .keep_alive = self.keep_alive,
-            .redirect_behavior = options.redirect_behavior orelse .unhandled,
+            .redirect_behavior = redirect_behavior,
         }) catch |err| {
             self.http_client.connection_pool.release(connection, self.io);
             return err;
@@ -152,24 +144,48 @@ pub const HttpTransport = struct {
             try request.sendBodiless();
         }
 
-        var response = try request.receiveHead(&.{});
+        const redirect_buffer = try self.allocRedirectBuffer(redirect_behavior);
+        defer self.freeRedirectBuffer(redirect_buffer, redirect_behavior);
+
+        var response = try request.receiveHead(redirect_buffer);
+        return try self.readFetchResult(options, &response);
+    }
+
+    fn allocRedirectBuffer(self: *HttpTransport, behavior: std.http.Client.Request.RedirectBehavior) ![]u8 {
+        if (behavior == .unhandled) return &.{};
+        return try self.allocator.alloc(u8, 8 * 1024);
+    }
+
+    fn freeRedirectBuffer(self: *HttpTransport, buffer: []u8, behavior: std.http.Client.Request.RedirectBehavior) void {
+        if (behavior != .unhandled) self.allocator.free(buffer);
+    }
+
+    fn readFetchResult(
+        self: *HttpTransport,
+        options: FetchOptions,
+        response: *std.http.Client.Response,
+    ) !FetchResult {
+        const rate_limit = RateLimitHeaders.fromResponseHead(response.head);
+
         if (options.max_response_size) |max| {
             const body_buf = try self.allocator.alloc(u8, max);
             defer self.allocator.free(body_buf);
             var writer = std.Io.Writer.fixed(body_buf);
-            try streamResponseBody(&response, &writer);
+            try streamResponseBody(response, &writer);
             return .{
                 .status = response.head.status,
                 .body = try self.allocator.dupe(u8, writer.buffered()),
+                .rate_limit = rate_limit,
             };
         }
 
         var aw: std.Io.Writer.Allocating = .init(self.allocator);
         defer aw.deinit();
-        try streamResponseBody(&response, &aw.writer);
+        try streamResponseBody(response, &aw.writer);
         return .{
             .status = response.head.status,
             .body = try self.allocator.dupe(u8, aw.written()),
+            .rate_limit = rate_limit,
         };
     }
 
@@ -196,8 +212,49 @@ pub const HttpTransport = struct {
     pub const FetchResult = struct {
         status: std.http.Status,
         body: []u8,
+        rate_limit: RateLimitHeaders = .{},
+    };
+
+    pub const RateLimitHeaders = struct {
+        limit: ?u64 = null,
+        remaining: ?u64 = null,
+        reset: ?u64 = null,
+        retry_after: ?u64 = null,
+
+        pub fn fromResponseHead(head: std.http.Client.Response.Head) RateLimitHeaders {
+            var result: RateLimitHeaders = .{};
+            var it = head.iterateHeaders();
+            while (it.next()) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "ratelimit-limit")) {
+                    result.limit = parseHeaderInt(header.value);
+                } else if (std.ascii.eqlIgnoreCase(header.name, "ratelimit-remaining")) {
+                    result.remaining = parseHeaderInt(header.value);
+                } else if (std.ascii.eqlIgnoreCase(header.name, "ratelimit-reset")) {
+                    result.reset = parseHeaderInt(header.value);
+                } else if (std.ascii.eqlIgnoreCase(header.name, "retry-after")) {
+                    result.retry_after = parseHeaderInt(header.value);
+                }
+            }
+            return result;
+        }
+
+        pub fn isEmpty(self: RateLimitHeaders) bool {
+            return self.limit == null and self.remaining == null and self.reset == null and self.retry_after == null;
+        }
     };
 };
+
+fn redirectBehavior(options: HttpTransport.FetchOptions) std.http.Client.Request.RedirectBehavior {
+    return options.redirect_behavior orelse if (options.payload == null)
+        std.http.Client.Request.RedirectBehavior.init(3)
+    else
+        .unhandled;
+}
+
+fn parseHeaderInt(value: []const u8) ?u64 {
+    const trimmed = std.mem.trim(u8, value, " \t");
+    return std.fmt.parseInt(u64, trimmed, 10) catch null;
+}
 
 fn streamResponseBody(response: *std.http.Client.Response, writer: *std.Io.Writer) !void {
     var transfer_buffer: [64]u8 = undefined;
@@ -243,4 +300,21 @@ test "resolved transport rejects mismatched logical host" {
             .logical_host = "other.example",
         },
     }));
+}
+
+test "transport parses rate limit headers" {
+    const response_bytes = "HTTP/1.1 429 Too Many Requests\r\n" ++
+        "RateLimit-Limit: 3000\r\n" ++
+        "ratelimit-remaining: 0\r\n" ++
+        "RateLimit-Reset: 1710000000\r\n" ++
+        "Retry-After: 2\r\n\r\n";
+
+    const head = try std.http.Client.Response.Head.parse(response_bytes);
+    const headers = HttpTransport.RateLimitHeaders.fromResponseHead(head);
+
+    try std.testing.expectEqual(@as(?u64, 3000), headers.limit);
+    try std.testing.expectEqual(@as(?u64, 0), headers.remaining);
+    try std.testing.expectEqual(@as(?u64, 1710000000), headers.reset);
+    try std.testing.expectEqual(@as(?u64, 2), headers.retry_after);
+    try std.testing.expect(!headers.isEmpty());
 }
