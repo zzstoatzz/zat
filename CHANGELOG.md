@@ -1,5 +1,13 @@
 # changelog
 
+## 0.3.1
+
+- **feat**: `XrpcClient.queryChecked` and `XrpcClient.procedureChecked` return a checked union of successful `Response` or structured `XrpcError`, preserving AT Protocol `error` / `message` envelopes for non-2xx responses.
+- **feat**: `XrpcClient.RetryPolicy` adds status-driven retries for transient transport errors plus HTTP 429/5xx responses, with `retry-after` and rate-limit header support.
+- **feat**: `HttpTransport.fetch` captures `ratelimit-limit`, `ratelimit-remaining`, `ratelimit-reset`, and `retry-after` headers on responses.
+- **fix**: DID and handle resolution now reject unsafe network targets by default, including private, loopback, link-local, multicast, documentation, and unspecified IP ranges.
+- **fix**: identity resolution validates DNS and redirect targets before issuing HTTP requests, reducing SSRF exposure when resolving untrusted AT Protocol identifiers.
+
 ## 0.3.0
 
 - **breaking**: zig 0.16 — all networking APIs take `io: std.Io` as first parameter
