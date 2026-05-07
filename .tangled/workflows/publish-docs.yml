@@ -1,12 +1,17 @@
 when:
-  - event: push
-    tag: "v*"
+  - event: ["push"]
+    branch: ["main"]
+    tag: ["v*"]
 
 engine: nixery
+
+clone:
+  depth: 50
 
 dependencies:
   nixpkgs:
     - curl
+    - git
     - gnutar
     - xz
 
@@ -18,5 +23,12 @@ steps:
 
   - name: build and publish docs to ATProto
     command: |
+      if [ "${TANGLED_REF#refs/tags/}" = "$TANGLED_REF" ]; then
+        changed="$(git diff-tree --no-commit-id --name-only -r HEAD)"
+        if ! printf '%s\n' "$changed" | grep -Eq '^(README\.md|CHANGELOG\.md|docs/|devlog/|scripts/publish-docs\.zig)'; then
+          echo "no docs/devlog changes; skipping ATProto docs publish"
+          exit 0
+        fi
+      fi
       /tangled/workspace/.zig/zig build
       ./zig-out/bin/publish-docs
