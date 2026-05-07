@@ -22,9 +22,8 @@ const min_iters = 10_000;
 const target_ns: u64 = 500_000_000; // run each bench for ~500ms
 
 fn clockNs() u64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
-    return @intCast(ts.sec * std.time.ns_per_s + ts.nsec);
+    const ts = std.Io.Timestamp.now(std.Options.debug_io, .awake);
+    return @intCast(ts.nanoseconds);
 }
 
 fn bench(name: []const u8, comptime func: anytype) void {

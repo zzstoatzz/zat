@@ -13,8 +13,8 @@ dependencies:
 steps:
   - name: install zig 0.16
     command: |
-      curl -sSL https://ziglang.org/builds/zig-x86_64-linux-0.16.0-dev.3070+b22eb176b.tar.xz | tar -xJ -C /tangled/workspace
-      mv /tangled/workspace/zig-x86_64-linux-0.16.0-dev.3070+b22eb176b /tangled/workspace/.zig
+      curl -sSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz | tar -xJ -C /tangled/workspace
+      mv /tangled/workspace/zig-x86_64-linux-0.16.0 /tangled/workspace/.zig
 
   - name: build and publish docs to ATProto
     command: |
