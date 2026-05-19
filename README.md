@@ -271,6 +271,38 @@ const post = try zat.json.extractAt(FeedPost, allocator, value, .{"post"});
 
 </details>
 
+## used by
+
+<details>
+<summary><strong>downstream projects</strong> — what's building on zat</summary>
+
+### firehose consumers (Jetstream)
+
+| project | what it does |
+|---|---|
+| [labelz](https://tangled.org/zzstoatzz.io/labelz) | AT Protocol labeler — keyword-matched, secp256k1-signed, served over XRPC. exists to pressure-test zat as an SDK ([live](https://labelz.fly.dev/health)) |
+| [coral](https://tangled.org/zzstoatzz.io/coral) | named-entity recognition over the firehose ([live](https://coral.waow.tech)) |
+| [pollz](https://tangled.org/zzstoatzz.io/pollz) | polls on AT Protocol ([live](https://pollz.waow.tech)) |
+| [typeahead](https://tangled.org/zzstoatzz.io/typeahead) | community actor search ([live](https://typeahead.waow.tech)) |
+| [find-bufo](https://tangled.org/zzstoatzz.io/find-bufo) | bsky bot that quote-posts matching bufo images for opt-in followers |
+
+### CBOR / CAR / MST users
+
+| project | what it does |
+|---|---|
+| [zlay](https://tangled.org/zzstoatzz.io/zlay) | AT Protocol relay — direct PDS crawl, signature validation, inline collection index ([live](https://zlay.waow.tech/_health)) |
+| [atproto-bench](https://tangled.org/zzstoatzz.io/atproto-bench) | cross-SDK relay benchmarks (zig vs go vs rust vs python) |
+| [ken](https://tangled.org/zzstoatzz.io/ken) | semantic search over your atproto repo — vector index of records, search by meaning ([live](https://ken.waow.tech)) |
+
+### identity + XRPC users
+
+| project | what it does |
+|---|---|
+| [music-atmosphere-feed](https://tangled.org/zzstoatzz.io/music-atmosphere-feed) | bsky feed generator for music links — JWT auth for personalized feed |
+| [leaflet-search](https://tangled.org/zzstoatzz.io/leaflet-search) | search across leaflet, pckt, offprint, and other standard.site publishers |
+
+</details>
+
 ## benchmarks
 
 zat is benchmarked against Go (indigo), Rust (rsky), and Python (atproto) in [atproto-bench](https://tangled.org/zzstoatzz.io/atproto-bench):
