@@ -23,9 +23,17 @@ steps:
 
   - name: build and publish docs to ATProto
     command: |
+      # branch pushes publish only when docs, devlog, or the publish tooling
+      # changed; tag pushes always publish. pure shell — grep is not in the image.
       if [ "${TANGLED_REF#refs/tags/}" = "$TANGLED_REF" ]; then
-        changed="$(git diff-tree --no-commit-id --name-only -r HEAD)"
-        if ! printf '%s\n' "$changed" | grep -Eq '^(README\.md|CHANGELOG\.md|docs/|devlog/|scripts/publish-docs\.zig)'; then
+        publish=0
+        for f in $(git diff-tree --no-commit-id --name-only -r HEAD); do
+          case "$f" in
+            README.md|CHANGELOG.md|docs/*|devlog/*|scripts/publish-docs.zig|.tangled/workflows/publish-docs.yml)
+              publish=1 ;;
+          esac
+        done
+        if [ "$publish" -eq 0 ]; then
           echo "no docs/devlog changes; skipping ATProto docs publish"
           exit 0
         fi
