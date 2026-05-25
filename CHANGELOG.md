@@ -1,5 +1,15 @@
 # changelog
 
+## 0.3.3
+
+- **feat**: `jwt.verifyJose(alg, message, signature, public_key)` — lenient ES256/ES256K verification for JOSE/JWT contexts (OAuth client assertions, DPoP), accepting high-S signatures per RFC 7515.
+- **fix**: `Jwt.verify` now verifies leniently (accepts high-S). a JWT is a JOSE token, where the atproto low-S requirement does not apply and WebCrypto-based signers routinely emit high-S signatures; the previous strict verification rejected valid service-auth and OAuth tokens. matches the reference SDKs (`@atproto/crypto` `allowMalleableSig`, atmos `HashAndVerifyLenient`). strict low-S enforcement is unchanged for content-addressed signatures — `verifyCommitCar`, `verifyCommitDiff`, and `verifyDidKeySignature` still reject high-S via `verifyP256` / `verifySecp256k1`.
+- **docs**: README "used by" section listing downstream consumers.
+
+## 0.3.2
+
+- **feat**: bump websocket.zig to v0.1.1 — streaming `Handshake.parse` onto `std.http.HeadParser` plus RFC 7230 strictness, fixing the recurring class of TCP-fragmentation parser bugs. two new error variants (`WhitespaceBeforeColon`, `AmbiguousBodyLength`) surface as 400 responses.
+
 ## 0.3.1
 
 - **feat**: `XrpcClient.queryChecked` and `XrpcClient.procedureChecked` return a checked union of successful `Response` or structured `XrpcError`, preserving AT Protocol `error` / `message` envelopes for non-2xx responses.

@@ -122,6 +122,13 @@ pub const Jwt = struct {
 
     /// verify the JWT signature against a public key
     /// public_key should be multibase-encoded (from DID document)
+    ///
+    /// JWTs are JOSE tokens (RFC 7515): the low-S requirement does not apply,
+    /// and signers such as WebCrypto-based OAuth clients routinely emit high-S
+    /// signatures. verification is therefore lenient on S. atproto's strict
+    /// low-S requirement is enforced where it belongs — on content-addressed
+    /// signatures (repo commits via verifyCommitCar, did:key via
+    /// verifyDidKeySignature), which use verifyP256/verifySecp256k1 directly.
     pub fn verify(self: *const Jwt, public_key_multibase: []const u8) !void {
         // decode multibase key
         const key_bytes = try multibase.decode(self.allocator, public_key_multibase);
@@ -132,15 +139,11 @@ pub const Jwt = struct {
 
         // verify key type matches algorithm
         switch (self.header.alg) {
-            .ES256K => {
-                if (parsed_key.key_type != .secp256k1) return error.AlgorithmKeyMismatch;
-                try verifySecp256k1(self.signed_input, self.signature, parsed_key.raw);
-            },
-            .ES256 => {
-                if (parsed_key.key_type != .p256) return error.AlgorithmKeyMismatch;
-                try verifyP256(self.signed_input, self.signature, parsed_key.raw);
-            },
+            .ES256K => if (parsed_key.key_type != .secp256k1) return error.AlgorithmKeyMismatch,
+            .ES256 => if (parsed_key.key_type != .p256) return error.AlgorithmKeyMismatch,
         }
+
+        try verifyJose(self.header.alg, self.signed_input, self.signature, parsed_key.raw);
     }
 
     /// check if the token is expired
@@ -317,6 +320,35 @@ pub fn verifyP256(message: []const u8, sig_bytes: []const u8, public_key_raw: []
     return verifyEcdsa(crypto.sign.ecdsa.EcdsaP256Sha256, p256_half_order, message, sig_bytes, public_key_raw);
 }
 
+/// verify a JOSE ECDSA signature (RFC 7515) WITHOUT the atproto low-S
+/// requirement: both low-S and high-S signatures are accepted.
+///
+/// use this for general JOSE JWTs — OAuth client assertions, DPoP proofs —
+/// where signing libraries are not required to normalize S, and high-S
+/// signatures are valid. repo commit and service-auth signatures must use the
+/// strict `Jwt.verify` / `verifyP256` / `verifySecp256k1` path, which rejects
+/// high-S to hold atproto's low-S requirement. do not reach for `verifyJose`
+/// where signature malleability matters (e.g. anything content-addressed).
+pub fn verifyJose(alg: Algorithm, message: []const u8, sig_bytes: []const u8, public_key_raw: []const u8) !void {
+    return switch (alg) {
+        .ES256 => verifyEcdsaJose(crypto.sign.ecdsa.EcdsaP256Sha256, message, sig_bytes, public_key_raw),
+        .ES256K => verifyEcdsaJose(crypto.sign.ecdsa.EcdsaSecp256k1Sha256, message, sig_bytes, public_key_raw),
+    };
+}
+
+/// verify an ECDSA signature accepting both low-S and high-S (RFC 7515 / JOSE).
+/// unlike `verifyEcdsa`, there is no `rejectHighS` step. `Signature.fromBytes`
+/// only copies bytes; an out-of-range `s` (>= curve order) is rejected by
+/// `verify` as `NonCanonical`, surfaced here as `SignatureVerificationFailed`.
+fn verifyEcdsaJose(comptime Scheme: type, message: []const u8, sig_bytes: []const u8, public_key_raw: []const u8) !void {
+    if (sig_bytes.len != 64) return error.InvalidSignature;
+    if (public_key_raw.len != 33) return error.InvalidPublicKey;
+
+    const sig = Scheme.Signature.fromBytes(sig_bytes[0..64].*);
+    const public_key = Scheme.PublicKey.fromSec1(public_key_raw) catch return error.InvalidPublicKey;
+    sig.verify(message, public_key) catch return error.SignatureVerificationFailed;
+}
+
 // === tests ===
 
 test "parse jwt structure" {
@@ -460,4 +492,116 @@ test "sign produces deterministic signatures" {
     const sig1 = try signSecp256k1(message, &sk_bytes);
     const sig2 = try signSecp256k1(message, &sk_bytes);
     try std.testing.expectEqualSlices(u8, &sig1.bytes, &sig2.bytes);
+}
+
+test "verifyJose accepts high-S P-256 while strict verifyP256 rejects it" {
+    const Scheme = crypto.sign.ecdsa.EcdsaP256Sha256;
+    const sk_bytes = [_]u8{
+        0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+        0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
+        0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+        0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40,
+    };
+    const message = "oauth client assertion";
+
+    // signP256 normalizes to low-S; flip S to its complement to get a valid
+    // high-S signature, exactly as a non-normalizing JOSE signer would emit.
+    const low = try signP256(message, &sk_bytes);
+    var high = low.bytes;
+    high[32..64].* = try crypto.ecc.P256.scalar.neg(low.bytes[32..64].*, .big);
+    try std.testing.expect(bigEndianGt(high[32..64].*, p256_half_order));
+
+    const sk = try Scheme.SecretKey.fromBytes(sk_bytes);
+    const kp = try Scheme.KeyPair.fromSecretKey(sk);
+    const pk = kp.public_key.toCompressedSec1();
+
+    // the strict (repo / did:key) policy rejects high-S
+    try std.testing.expectError(error.SignatureVerificationFailed, verifyP256(message, &high, &pk));
+    // the JOSE policy accepts it — and still accepts the low-S form
+    try verifyJose(.ES256, message, &high, &pk);
+    try verifyJose(.ES256, message, &low.bytes, &pk);
+}
+
+test "verifyJose accepts high-S secp256k1 while strict verifySecp256k1 rejects it" {
+    const Scheme = crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
+    const sk_bytes = [_]u8{
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+        0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+    };
+    const message = "oauth client assertion";
+
+    const low = try signSecp256k1(message, &sk_bytes);
+    var high = low.bytes;
+    high[32..64].* = try crypto.ecc.Secp256k1.scalar.neg(low.bytes[32..64].*, .big);
+    try std.testing.expect(bigEndianGt(high[32..64].*, secp256k1_half_order));
+
+    const sk = try Scheme.SecretKey.fromBytes(sk_bytes);
+    const kp = try Scheme.KeyPair.fromSecretKey(sk);
+    const pk = kp.public_key.toCompressedSec1();
+
+    try std.testing.expectError(error.SignatureVerificationFailed, verifySecp256k1(message, &high, &pk));
+    try verifyJose(.ES256K, message, &high, &pk);
+    try verifyJose(.ES256K, message, &low.bytes, &pk);
+}
+
+test "Jwt.verify accepts a high-S ES256 JWT (JOSE leniency)" {
+    const allocator = std.testing.allocator;
+    const Scheme = crypto.sign.ecdsa.EcdsaP256Sha256;
+    const sk_bytes = [_]u8{
+        0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+        0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
+        0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+        0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40,
+    };
+
+    const header_b64 = try base64UrlEncode(allocator, "{\"alg\":\"ES256\",\"typ\":\"JWT\"}");
+    defer allocator.free(header_b64);
+    const payload_b64 = try base64UrlEncode(allocator, "{\"iss\":\"did:example:iss\",\"aud\":\"did:example:aud\",\"exp\":9999999999}");
+    defer allocator.free(payload_b64);
+    const signed_input = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ header_b64, payload_b64 });
+    defer allocator.free(signed_input);
+
+    const low = try signP256(signed_input, &sk_bytes);
+    var high = low.bytes;
+    high[32..64].* = try crypto.ecc.P256.scalar.neg(low.bytes[32..64].*, .big);
+    const sig_b64 = try base64UrlEncode(allocator, &high);
+    defer allocator.free(sig_b64);
+    const token = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ signed_input, sig_b64 });
+    defer allocator.free(token);
+
+    // the public key as it would appear in a DID document (multibase multikey)
+    const sk = try Scheme.SecretKey.fromBytes(sk_bytes);
+    const kp = try Scheme.KeyPair.fromSecretKey(sk);
+    const pk = kp.public_key.toCompressedSec1();
+    const mc = try multicodec.encodePublicKey(allocator, .p256, &pk);
+    defer allocator.free(mc);
+    const multibase_key = try multibase.encode(allocator, .base58btc, mc);
+    defer allocator.free(multibase_key);
+
+    var jwt = try Jwt.parse(allocator, token);
+    defer jwt.deinit();
+    try jwt.verify(multibase_key);
+}
+
+test "verifyJose rejects out-of-range S without panicking" {
+    const Scheme = crypto.sign.ecdsa.EcdsaP256Sha256;
+    const sk_bytes = [_]u8{
+        0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+        0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
+        0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+        0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40,
+    };
+    const message = "out of range";
+
+    const low = try signP256(message, &sk_bytes);
+    var bad = low.bytes;
+    bad[32..64].* = [_]u8{0xFF} ** 32; // s >= curve order: non-canonical
+
+    const sk = try Scheme.SecretKey.fromBytes(sk_bytes);
+    const kp = try Scheme.KeyPair.fromSecretKey(sk);
+    const pk = kp.public_key.toCompressedSec1();
+
+    try std.testing.expectError(error.SignatureVerificationFailed, verifyJose(.ES256, message, &bad, &pk));
 }
