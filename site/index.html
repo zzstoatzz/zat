@@ -6,6 +6,22 @@
     <base href="/" />
     <title>zat.dev</title>
     <meta name="description" content="AT Protocol building blocks for zig" />
+
+    <!-- standard.site: advertise the publication's atproto record so link-unfurl
+         proxies (e.g. bluesky's cardyb) render a rich publication embed -->
+    <link rel="alternate" href="at://did:plc:mkqt76xvfgxuemlwlx6ruc3w/site.standard.publication/3khuwc44c2222" />
+    <link rel="site.standard.publication" href="at://did:plc:mkqt76xvfgxuemlwlx6ruc3w/site.standard.publication/3khuwc44c2222" />
+
+    <!-- opengraph / twitter card for clients without standard.site support -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://zat.dev/" />
+    <meta property="og:title" content="zat.dev" />
+    <meta property="og:description" content="AT Protocol building blocks for zig" />
+    <meta property="og:image" content="https://zat.dev/favicon.svg" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="zat.dev" />
+    <meta name="twitter:description" content="AT Protocol building blocks for zig" />
+
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
