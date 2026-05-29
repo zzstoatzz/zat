@@ -1,5 +1,9 @@
 # changelog
 
+## 0.3.4
+
+- **fix**: bump websocket.zig to v0.1.4 — best-effort `setsockopt` on connection sockets. when a peer resets or another thread closes a socket mid-flight, the RCVTIMEO/SNDTIMEO/TCP_NODELAY calls hit `EBADF`/`ENOTSOCK`, which `std.posix.setsockopt` maps to `unreachable` ("always a race condition"), panicking the worker thread (SIGSEGV); the prior `catch` could not swallow it. also folds in v0.1.2 (defer `InvalidConnection`/`InvalidUpgrade` past the handshake body-completeness check) and v0.1.3 (close socket in nonblocking `cleanupConn`, fixing an FD leak).
+
 ## 0.3.3
 
 - **feat**: `jwt.verifyJose(alg, message, signature, public_key)` — lenient ES256/ES256K verification for JOSE/JWT contexts (OAuth client assertions, DPoP), accepting high-S signatures per RFC 7515.
