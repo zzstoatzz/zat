@@ -68,7 +68,11 @@ pub const firehose = @import("internal/streaming/firehose.zig");
 pub const FirehoseClient = firehose.FirehoseClient;
 pub const FirehoseEvent = firehose.Event;
 
-// interop tests (test-only, references resolved by build.zig lazy dependency)
+// Test-only imports:
+// - inline tests in implementation files stay next to private helpers/fixtures
+// - *_test.zig files are supplemental black-box, stress, and compliance suites
+//   that must be imported explicitly because Zig does not auto-discover tests
+// - interop fixtures are resolved by build.zig's lazy dependency wiring
 comptime {
     if (@import("builtin").is_test) {
         _ = @import("internal/testing/interop_tests.zig");

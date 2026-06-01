@@ -1,7 +1,8 @@
-//! additional MST tests ported from atmos (Go implementation).
+//! supplemental MST tests ported from Atmos (Go implementation).
 //!
-//! focuses on edge cases, stress tests, and compliance gaps not covered
-//! by the inline tests in mst.zig.
+//! mst.zig keeps inline tests near private helpers, reference fixtures, and
+//! implementation-sensitive behavior. this file is the external suite for
+//! black-box API behavior, stress cases, and compliance gaps.
 
 const std = @import("std");
 const mst = @import("mst.zig");
