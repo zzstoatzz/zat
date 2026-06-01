@@ -14,6 +14,7 @@ import { promisify } from "node:util";
 const repoRoot = path.resolve(new URL("..", import.meta.url).pathname);
 const docsDir = path.join(repoRoot, "docs");
 const devlogDir = path.join(repoRoot, "devlog");
+const devlogImgDir = path.join(devlogDir, "img");
 const siteSrcDir = path.join(repoRoot, "site");
 const outDir = path.join(repoRoot, "site-out");
 const outDocsDir = path.join(outDir, "docs");
@@ -161,6 +162,12 @@ async function main() {
   // Copy devlog files to docs/devlog/ and generate an index
   const devlogFiles = (await exists(devlogDir)) ? await listMarkdownFiles(devlogDir) : [];
   const devlogEntries = [];
+
+  if (await exists(devlogImgDir)) {
+    await cp(devlogImgDir, path.join(outDocsDir, "devlog", "img"), {
+      recursive: true,
+    });
+  }
 
   for (const rel of devlogFiles) {
     const src = path.join(devlogDir, rel);
