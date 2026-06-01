@@ -1,5 +1,12 @@
 # changelog
 
+## 0.3.5 (planned)
+
+- **perf**: align MST hot paths with Atmos while preserving AT Protocol root parity. The tree now uses nullable child pointers with CID-only lazy stubs, direct DAG-CBOR node serialization, cached clean-node CIDs, chunked key comparison, borrowed-key insertion for benchmark/import paths, and small-node linear lookup. The atproto-bench apples-to-apples MST run now has Zat ahead of Atmos on both insert+root and lookup while producing the same root bytes.
+- **feat**: `Mst.collectBlocks` and `Mst.walk` add the missing middle layer for consumers that need commit-CAR MST blocks or ordered repo traversal without reaching through `Node` internals. This is additive public API; existing callers should not break.
+- **test**: ZDS main now consumes the new MST middle layer in record writes and repo import, pinned to Zat commit `485f1d485a9b8e7b703e8627a6b6a8c3e3c36a0e`, and is deployed as `atcr.io/zat.dev/zds:latest` from merged ZDS commit `8d1a8182dace`.
+- **docs**: devlog 012 captures the Atmos comparison, the MST representation changes, the lookup diagnosis, and the ZDS adoption proof. Ran `zig zen` during release prep; the relevant guidance here is "Communicate intent precisely", "Edge cases matter", "Avoid local maximums", and "Together we serve the users."
+
 ## 0.3.4
 
 - **fix**: bump websocket.zig to v0.1.4 — best-effort `setsockopt` on connection sockets. when a peer resets or another thread closes a socket mid-flight, the RCVTIMEO/SNDTIMEO/TCP_NODELAY calls hit `EBADF`/`ENOTSOCK`, which `std.posix.setsockopt` maps to `unreachable` ("always a race condition"), panicking the worker thread (SIGSEGV); the prior `catch` could not swallow it. also folds in v0.1.2 (defer `InvalidConnection`/`InvalidUpgrade` past the handshake body-completeness check) and v0.1.3 (close socket in nonblocking `cleanupConn`, fixing an FD leak).

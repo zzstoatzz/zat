@@ -158,3 +158,24 @@ ZDS is the first proof consumer: record writes now call `tree.collectBlocks`,
 and repo import now calls `tree.walk` instead of traversing MST internals. That
 keeps the new MST machinery exercised by a real service without preserving the
 old public internals by accident.
+
+## release checkpoint
+
+The intended patch release line is `0.3.5`; the package is still stamped
+`0.3.4` until we decide ZDS has soaked long enough. The ZDS deployment proof is
+explicitly tied to Zat commit
+`485f1d485a9b8e7b703e8627a6b6a8c3e3c36a0e`, not to a floating branch. ZDS main
+commit `8d1a8182dace` pins that exact commit and exercises both new public MST
+APIs in production paths.
+
+`zig zen` was part of the release-prep pass. The relevant bits for this change:
+
+- "Communicate intent precisely." The release notes should say this is an
+  internal representation change plus additive public API, not a consumer
+  rewrite requirement.
+- "Edge cases matter." `collectBlocks` deliberately skips clean unresolved
+  stubs because commit CARs only need newly materialized MST blocks.
+- "Avoid local maximums." The lookup win came from deleting clever binary
+  search on tiny nodes, not from making the code more sophisticated.
+- "Together we serve the users." ZDS is the real-world proof consumer before
+  tagging the library release.
