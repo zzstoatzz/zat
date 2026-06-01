@@ -244,18 +244,19 @@ pub const Mst = struct {
 
     /// look up a key, returning its CID value if present
     pub fn get(self: *const Mst, key: []const u8) ?cbor.Cid {
-        return findKey(self.root, self.root_layer orelse return null, key, keyHeight(key));
+        return findKey(self.root, key);
     }
 
     /// look up a key when its MST height has already been computed.
     pub fn getWithHeight(self: *const Mst, key: []const u8, height: u32) ?cbor.Cid {
-        return findKey(self.root, self.root_layer orelse return null, key, height);
+        _ = height;
+        return findKey(self.root, key);
     }
 
     /// look up a key, resolving lazy stubs on demand.
     pub fn getLazy(self: *Mst, key: []const u8) !?cbor.Cid {
         try self.ensureRootLoaded();
-        return try self.findKeyLazy(self.root, self.root_layer orelse return null, key, keyHeight(key));
+        return try self.findKeyLazy(self.root, key);
     }
 
     fn entryLowerBound(entries: []const Node.Entry, key: []const u8) usize {
@@ -276,80 +277,37 @@ pub const Mst = struct {
         return if (idx == 0) &node.left else &node.entries.items[idx - 1].right;
     }
 
-    fn childAtIndexConst(node: *const Node, idx: usize) ?*Node {
-        return if (idx == 0) node.left else node.entries.items[idx - 1].right;
-    }
-
-    fn findKey(maybe_node: ?*Node, layer: u32, key: []const u8, height: u32) ?cbor.Cid {
-        const node = maybe_node orelse return null;
-
-        if (height >= layer) {
+    fn findKey(root: ?*Node, key: []const u8) ?cbor.Cid {
+        var maybe_node = root;
+        while (maybe_node) |node| {
+            var next = node.left;
             for (node.entries.items) |entry| {
                 switch (keyOrder(key, entry.key)) {
-                    .lt => return null,
+                    .lt => break,
                     .eq => return entry.value,
-                    .gt => {},
+                    .gt => next = entry.right,
                 }
             }
-            return null;
+            maybe_node = next;
         }
-
-        if (layer == 0) return null;
-        for (node.entries.items, 0..) |entry, i| {
-            switch (keyOrder(key, entry.key)) {
-                .lt => {
-                    const child = if (i == 0) node.left else node.entries.items[i - 1].right;
-                    return findKey(child, layer - 1, key, height);
-                },
-                .eq => return entry.value,
-                .gt => {},
-            }
-        }
-
-        const child = if (node.entries.items.len > 0)
-            node.entries.items[node.entries.items.len - 1].right
-        else
-            node.left;
-        return findKey(child, layer - 1, key, height);
+        return null;
     }
 
-    fn findKeyLazy(self: *Mst, maybe_node: ?*Node, layer: u32, key: []const u8, height: u32) !?cbor.Cid {
-        const node = maybe_node orelse return null;
-
-        if (height >= layer) {
-            for (node.entries.items) |entry| {
+    fn findKeyLazy(self: *Mst, root: ?*Node, key: []const u8) !?cbor.Cid {
+        var maybe_node = root;
+        while (maybe_node) |node| {
+            const loaded = try self.ensureNodeLoaded(node);
+            var child_ref: *?*Node = &loaded.left;
+            for (loaded.entries.items) |*entry| {
                 switch (keyOrder(key, entry.key)) {
-                    .lt => return null,
+                    .lt => break,
                     .eq => return entry.value,
-                    .gt => {},
+                    .gt => child_ref = &entry.right,
                 }
             }
-            return null;
+            maybe_node = try self.ensureChildNode(child_ref);
         }
-
-        if (layer == 0) return null;
-        for (node.entries.items, 0..) |entry, i| {
-            switch (keyOrder(key, entry.key)) {
-                .lt => {
-                    const child_ref = if (i == 0) &node.left else &node.entries.items[i - 1].right;
-                    if (try self.ensureChildNode(child_ref)) |child|
-                        return try self.findKeyLazy(child, layer - 1, key, height)
-                    else
-                        return null;
-                },
-                .eq => return entry.value,
-                .gt => {},
-            }
-        }
-
-        const child_ref = if (node.entries.items.len > 0)
-            &node.entries.items[node.entries.items.len - 1].right
-        else
-            &node.left;
-        if (try self.ensureChildNode(child_ref)) |child|
-            return try self.findKeyLazy(child, layer - 1, key, height)
-        else
-            return null;
+        return null;
     }
 
     /// delete a key from the tree
@@ -1243,6 +1201,56 @@ test "put and get" {
     try std.testing.expectEqualSlices(u8, cid2.raw, got2.raw);
 
     try std.testing.expect(tree.get("nonexistent") == null);
+}
+
+test "lookup walks ordered tree like lazy lookup" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var tree = Mst.init(a);
+    const keys = [_][]const u8{
+        "A0/374913",
+        "B1/986427",
+        "C0/451630",
+        "D2/269196",
+        "E0/670489",
+        "F1/085263",
+        "G0/765327",
+        "app.bsky.feed.post/9adeb165882c",
+    };
+
+    for (keys) |key| {
+        const value = try cbor.Cid.forDagCbor(a, key);
+        try tree.put(key, value);
+    }
+    try std.testing.expect((tree.root_layer orelse 0) > 0);
+
+    var store = TestBlockStore{};
+    const root_cid = try store.putNode(a, &tree, tree.root.?);
+    var lazy = try Mst.loadLazy(a, root_cid.raw, store.reader());
+
+    for (keys) |key| {
+        const expected = tree.get(key) orelse return error.NotFound;
+        const with_height = tree.getWithHeight(key, std.math.maxInt(u32)) orelse return error.NotFound;
+        const lazy_got = try lazy.getLazy(key) orelse return error.NotFound;
+        try std.testing.expectEqualSlices(u8, expected.raw, with_height.raw);
+        try std.testing.expectEqualSlices(u8, expected.raw, lazy_got.raw);
+    }
+
+    const misses = [_][]const u8{
+        "A0/000000",
+        "B1/999999",
+        "D2/269197",
+        "app.bsky.feed.post/000000000000",
+        "z",
+    };
+    for (misses) |key| {
+        try std.testing.expect(tree.get(key) == null);
+        try std.testing.expect(tree.getWithHeight(key, 0) == null);
+        try std.testing.expect(try lazy.getLazy(key) == null);
+    }
 }
 
 test "put and delete" {

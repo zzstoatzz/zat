@@ -36,7 +36,8 @@ We tried that. `ChildRef` is gone from the hot structure: `Node.left` and `Entry
 - borrowed-key insertion for benchmark and caller-owned-key use cases
 - hot entry layout matching Atmos's `key/right/value` ordering
 - chunked MST key comparison instead of generic scalar byte ordering
-- `getWithHeight` for callers that already know the key height
+- `getWithHeight` kept as API compatibility for callers that already know the
+  key height, but lookup no longer needs the height
 - nullable child pointers instead of `ChildRef` union tags
 
 ## what moved
@@ -55,19 +56,23 @@ The benchmark now reports one Zat path, not a menu of experiments:
 - cached node CIDs
 - direct MST node serialization
 - chunked key comparison
-- precomputed lookup heights
-- linear lookup scan through tiny MST nodes
+- Atmos-style ordered-tree lookup through tiny MST nodes
 
 Latest cleaned run:
 
 | implementation | insert + root | lookup |
 |---|---:|---:|
-| Zat | 5,499,189 records/sec | 6,782,217 lookups/sec |
-| Atmos | 3,998,720 records/sec | 5,115,000 lookups/sec |
+| Zat | 5,728,470 records/sec | 6,540,333 lookups/sec |
+| Atmos | 4,147,900 records/sec | 5,512,120 lookups/sec |
 
 Both implementations produced the same root bytes:
 
 `01711220d59a82ffb8968ab6ff46354b382a18072f382240bc447c70e8cbc579221c8c2e`
+
+Those rows are the median of three official `just bench-mst` runs after the
+lookup path was changed to match Atmos semantically. Each run still uses one
+warmup pass and five measured passes over the same deterministic 50k-record
+corpus, with 500k lookups/pass.
 
 ## why zat now wins insert
 
@@ -99,7 +104,11 @@ Atmos lookup has:
 
 Zat had been using binary lower-bound for lookup because entries are sorted. That is asymptotically attractive and practically wrong here. With at most 32 entries per node, binary search pays for unpredictable midpoint branches and worse locality. Linear scan is more predictable, walks memory contiguously, and matches the practical Atmos shape.
 
-After switching lookup to linear scan, Zat's selected lookup path moved ahead of Atmos in the apples-to-apples bench while keeping the same root bytes.
+After switching lookup to an Atmos-style ordered walk, Zat's selected lookup
+path moved ahead of Atmos in the apples-to-apples bench while keeping the same
+root bytes. That walk does not use the key height to decide when to stop. It
+compares the target key against entries in order, chooses `left` or the
+previous entry's `right` child, and loads that selected child on the lazy path.
 
 Zat lookup now keeps:
 
@@ -135,6 +144,12 @@ So yes: we were choosing to be smart for no reason. Binary search still makes se
 The likely direction is not "make Zig act like Go." It is to keep giving the hot path the same simple problem Atmos gives Go: pointer children, fast key compare, small-node linear scan, and fewer representation states in the inner loop.
 
 One empirical note from the final cleanup: adding a per-entry key ownership bit made borrowed keys safer in the abstract but fattened the hot `Entry` layout and immediately showed up in lookup. The better match for this MST is arena/lifetime ownership: copied keys live with the tree, borrowed keys must outlive the tree, and delete removes logical entries without trying to reclaim per-key storage.
+
+The last lookup cleanup removed the remaining height/layer branch from lookup
+itself. That leaves height where the MST semantics need it, namely insertion,
+deletion, splitting, and normalization. Plain lookup now matches Atmos: walk
+the ordered tree by key and load child nodes only when that child is the chosen
+path.
 
 ## missing middle
 
