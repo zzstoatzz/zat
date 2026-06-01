@@ -170,8 +170,6 @@ async function main() {
   }
 
   for (const rel of devlogFiles) {
-    if (rel === "index.md") continue;
-
     const src = path.join(devlogDir, rel);
     const dst = path.join(outDocsDir, "devlog", rel);
     await mkdir(path.dirname(dst), { recursive: true });

@@ -28,8 +28,6 @@ const devlog = [_]DocEntry{
     .{ .path = "/devlog/012", .file = "devlog/012-mst-bench-notes.md" },
 };
 
-const devlog_index = DocEntry{ .path = "/devlog/index", .file = "devlog/index.md" };
-
 pub fn main() !void {
     // use page_allocator for CLI tool - OS reclaims on exit
     const allocator = std.heap.page_allocator;
@@ -93,7 +91,6 @@ pub fn main() !void {
     try devlog_uri_buf.print(allocator, "at://{s}/site.standard.publication/{s}", .{ session.did, devlog_tid.str() });
     const devlog_uri = devlog_uri_buf.items;
 
-    try publishEntry(&client, allocator, session.did, devlog_index, devlog_uri, 100, &now);
     try publishEntries(&client, allocator, session.did, &devlog, devlog_uri, 101, &now);
 
     std.debug.print("done\n", .{});
@@ -209,38 +206,26 @@ fn publishEntries(
     now: *const [20]u8,
 ) !void {
     for (entries, 0..) |entry, i| {
-        try publishEntry(client, allocator, did, entry, site_uri, @intCast(clock_id_base + i), now);
+        const content = std.Io.Dir.readFileAlloc(.cwd(), std.Options.debug_io, entry.file, allocator, .limited(1024 * 1024)) catch |err| {
+            std.debug.print("warning: could not read {s}: {}\n", .{ entry.file, err });
+            continue;
+        };
+        defer allocator.free(content);
+
+        const title = extractTitle(content) orelse entry.file;
+        const tid = zat.Tid.fromTimestamp(1704067200000000, @intCast(clock_id_base + i));
+
+        const record = Document{
+            .site = site_uri,
+            .title = title,
+            .path = entry.path,
+            .textContent = content,
+            .publishedAt = now,
+        };
+
+        try putRecord(client, allocator, did, "site.standard.document", tid.str(), record);
+        std.debug.print("published: {s} -> at://{s}/site.standard.document/{s}\n", .{ entry.file, did, tid.str() });
     }
-}
-
-fn publishEntry(
-    client: *zat.XrpcClient,
-    allocator: Allocator,
-    did: []const u8,
-    entry: DocEntry,
-    site_uri: []const u8,
-    clock_id: usize,
-    now: *const [20]u8,
-) !void {
-    const content = std.Io.Dir.readFileAlloc(.cwd(), std.Options.debug_io, entry.file, allocator, .limited(1024 * 1024)) catch |err| {
-        std.debug.print("warning: could not read {s}: {}\n", .{ entry.file, err });
-        return;
-    };
-    defer allocator.free(content);
-
-    const title = extractTitle(content) orelse entry.file;
-    const tid = zat.Tid.fromTimestamp(1704067200000000, @intCast(clock_id));
-
-    const record = Document{
-        .site = site_uri,
-        .title = title,
-        .path = entry.path,
-        .textContent = content,
-        .publishedAt = now,
-    };
-
-    try putRecord(client, allocator, did, "site.standard.document", tid.str(), record);
-    std.debug.print("published: {s} -> at://{s}/site.standard.document/{s}\n", .{ entry.file, did, tid.str() });
 }
 
 fn timestamp() [20]u8 {
