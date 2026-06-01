@@ -51,6 +51,8 @@ the publishable benchmark is the official `atproto-bench` MST run: one Zat path,
 
 median of three `just bench-mst` runs, each with one warmup pass and five measured passes over 50k deterministic records and 500k lookups per pass:
 
+<img src="https://tangled.org/zat.dev/zat/raw/main/devlog/img/mst-throughput.svg" alt="Zat and Atmos MST benchmark throughput chart" width="960">
+
 | implementation | insert + root | lookup |
 |---|---:|---:|
 | Zat | 5,728,470 records/sec | 6,540,333 lookups/sec |
