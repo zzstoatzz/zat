@@ -147,6 +147,20 @@ pub const Operation = struct {
     }
 };
 
+pub const WalkEntry = struct {
+    key: []const u8,
+    value: cbor.Cid,
+};
+
+pub const Walker = struct {
+    ctx: *anyopaque,
+    entryFn: *const fn (ctx: *anyopaque, entry: WalkEntry) anyerror!void,
+
+    pub fn entry(self: Walker, e: WalkEntry) anyerror!void {
+        return self.entryFn(self.ctx, e);
+    }
+};
+
 /// merkle search tree
 pub const Mst = struct {
     allocator: Allocator,
@@ -469,13 +483,40 @@ pub const Mst = struct {
         return self.nodeCid(null);
     }
 
+    /// append DAG-CBOR MST blocks for the loaded tree surface.
+    ///
+    /// Clean unresolved stubs are skipped: their CIDs already point at blocks
+    /// held elsewhere. This is the shape needed for commit CAR construction,
+    /// where only the newly materialized path needs to be emitted.
+    pub fn collectBlocks(self: *Mst, out: *std.ArrayList(car.Block)) MstError!void {
+        if (self.root) |root| {
+            try self.collectNodeBlocks(root, out);
+            return;
+        }
+
+        const encoded = try self.serializeEmptyNode();
+        errdefer self.allocator.free(encoded);
+        const cid = try cbor.Cid.forDagCbor(self.allocator, encoded);
+        try out.append(self.allocator, .{
+            .cid_raw = try self.allocator.dupe(u8, cid.raw),
+            .data = encoded,
+        });
+    }
+
+    /// walk loaded records in MST key order.
+    ///
+    /// If the tree contains unresolved stubs and no block reader can resolve
+    /// them, this returns `error.PartialTree`.
+    pub fn walk(self: *Mst, walker: Walker) anyerror!void {
+        try self.ensureRootLoaded();
+        if (self.root) |root| {
+            try self.walkNode(root, walker);
+        }
+    }
+
     fn nodeCid(self: *Mst, child: ?*Node) MstError!cbor.Cid {
         const node = child orelse {
-            // empty node: { "l": null, "e": [] }
-            const encoded = try cbor.encodeAlloc(self.allocator, .{ .map = &.{
-                .{ .key = "e", .value = .{ .array = &.{} } },
-                .{ .key = "l", .value = .null },
-            } });
+            const encoded = try self.serializeEmptyNode();
             defer self.allocator.free(encoded);
             return cbor.Cid.forDagCbor(self.allocator, encoded);
         };
@@ -494,6 +535,47 @@ pub const Mst = struct {
         loaded.cid = .{ .raw = try self.allocator.dupe(u8, cid.raw) };
         loaded.dirty = false;
         return cid;
+    }
+
+    fn collectNodeBlocks(self: *Mst, node: *Node, out: *std.ArrayList(car.Block)) MstError!void {
+        if (isUnloadedStub(node)) return;
+
+        const loaded = self.ensureNodeLoaded(node) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.PartialTree => return error.PartialTree,
+            else => return error.PartialTree,
+        };
+
+        if (loaded.left) |left| try self.collectNodeBlocks(left, out);
+        for (loaded.entries.items) |entry| {
+            if (entry.right) |right| try self.collectNodeBlocks(right, out);
+        }
+
+        const encoded = try self.serializeNode(loaded);
+        errdefer self.allocator.free(encoded);
+        const cid = try cbor.Cid.forDagCbor(self.allocator, encoded);
+        loaded.cid = .{ .raw = try self.allocator.dupe(u8, cid.raw) };
+        loaded.dirty = false;
+        try out.append(self.allocator, .{
+            .cid_raw = try self.allocator.dupe(u8, cid.raw),
+            .data = encoded,
+        });
+    }
+
+    fn walkNode(self: *Mst, node: *Node, walker: Walker) anyerror!void {
+        const loaded = try self.ensureNodeLoaded(node);
+        if (loaded.left) |left| try self.walkNode(left, walker);
+        for (loaded.entries.items) |entry| {
+            try walker.entry(.{ .key = entry.key, .value = entry.value });
+            if (entry.right) |right| try self.walkNode(right, walker);
+        }
+    }
+
+    fn serializeEmptyNode(self: *Mst) MstError![]u8 {
+        return cbor.encodeAlloc(self.allocator, .{ .map = &.{
+            .{ .key = "e", .value = .{ .array = &.{} } },
+            .{ .key = "l", .value = .null },
+        } });
     }
 
     fn serializeNode(self: *Mst, node: *Node) MstError![]u8 {
@@ -710,6 +792,10 @@ pub const Mst = struct {
         node.* = Node.init(layer orelse 0, false);
         node.cid = .{ .raw = try allocator.dupe(u8, cid_raw) };
         return node;
+    }
+
+    fn isUnloadedStub(node: *const Node) bool {
+        return !node.dirty and node.cid != null and node.left == null and node.entries.items.len == 0;
     }
 
     fn storeKey(self: *Mst, key: []const u8, copy_key: bool) Allocator.Error![]const u8 {
@@ -1476,6 +1562,65 @@ test "rootCid caches clean root and put dirties it" {
     const root3 = try tree.rootCid();
     try std.testing.expect(!tree.root.?.dirty);
     try std.testing.expect(!std.mem.eql(u8, root1.raw, root3.raw));
+}
+
+const WalkCollector = struct {
+    allocator: Allocator,
+    keys: std.ArrayList([]const u8) = .empty,
+
+    fn walker(self: *WalkCollector) Walker {
+        return .{
+            .ctx = self,
+            .entryFn = onEntry,
+        };
+    }
+
+    fn onEntry(ctx: *anyopaque, entry: WalkEntry) anyerror!void {
+        const self: *WalkCollector = @ptrCast(@alignCast(ctx));
+        try self.keys.append(self.allocator, try self.allocator.dupe(u8, entry.key));
+    }
+};
+
+test "walk visits entries in key order" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const leaf_cid = try parseCidString(a, "bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454");
+    var tree = Mst.init(a);
+    try tree.put("app.bsky.feed.post/3", leaf_cid);
+    try tree.put("app.bsky.feed.post/1", leaf_cid);
+    try tree.put("app.bsky.feed.post/2", leaf_cid);
+
+    var collector = WalkCollector{ .allocator = a };
+    try tree.walk(collector.walker());
+
+    try std.testing.expectEqual(@as(usize, 3), collector.keys.items.len);
+    try std.testing.expectEqualStrings("app.bsky.feed.post/1", collector.keys.items[0]);
+    try std.testing.expectEqualStrings("app.bsky.feed.post/2", collector.keys.items[1]);
+    try std.testing.expectEqualStrings("app.bsky.feed.post/3", collector.keys.items[2]);
+}
+
+test "collectBlocks emits a loadable MST root" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const leaf_cid = try parseCidString(a, "bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454");
+    var tree = Mst.init(a);
+    try tree.put("app.bsky.feed.post/1", leaf_cid);
+    try tree.put("app.bsky.feed.post/2", leaf_cid);
+
+    const root = try tree.rootCid();
+    var blocks: std.ArrayList(car.Block) = .empty;
+    try tree.collectBlocks(&blocks);
+
+    const repo_car = car.Car{ .roots = &.{root}, .blocks = blocks.items };
+    var loaded = try Mst.loadFromBlocks(a, repo_car, root.raw);
+    const got = loaded.get("app.bsky.feed.post/1") orelse return error.NotFound;
+    try std.testing.expectEqualSlices(u8, leaf_cid.raw, got.raw);
 }
 
 test "getLazy resolves root and child stubs on demand" {

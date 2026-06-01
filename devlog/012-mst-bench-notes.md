@@ -135,3 +135,26 @@ So yes: we were choosing to be smart for no reason. Binary search still makes se
 The likely direction is not "make Zig act like Go." It is to keep giving the hot path the same simple problem Atmos gives Go: pointer children, fast key compare, small-node linear scan, and fewer representation states in the inner loop.
 
 One empirical note from the final cleanup: adding a per-entry key ownership bit made borrowed keys safer in the abstract but fattened the hot `Entry` layout and immediately showed up in lookup. The better match for this MST is arena/lifetime ownership: copied keys live with the tree, borrowed keys must outlive the tree, and delete removes logical entries without trying to reclaim per-key storage.
+
+## missing middle
+
+The first downstream adoption pass found the expected gap: ZDS was still doing
+MST work by reaching through Zat internals. It serialized `Node` values directly,
+walked `node.left` and `entry.right`, and knew about the old `ChildRef` union.
+That was a useful alarm bell. If the Atmos-shaped internal representation is
+allowed to change, consumers need a stable layer that names the actual jobs:
+
+- collect MST DAG-CBOR blocks for a commit CAR
+- walk repo records in MST key order
+
+Zat now exposes those as `Mst.collectBlocks` and `Mst.walk`. `collectBlocks`
+emits the loaded tree surface and intentionally skips clean unresolved stubs,
+matching the old ZDS commit-CAR behavior where existing blocks stay in repo
+storage instead of being re-exported every write. `walk` resolves lazy nodes
+when a block reader is available and returns `PartialTree` if a consumer asks
+to walk through an unresolved stub.
+
+ZDS is the first proof consumer: record writes now call `tree.collectBlocks`,
+and repo import now calls `tree.walk` instead of traversing MST internals. That
+keeps the new MST machinery exercised by a real service without preserving the
+old public internals by accident.
