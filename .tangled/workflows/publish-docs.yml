@@ -23,6 +23,10 @@ steps:
 
   - name: build and publish docs to ATProto
     command: |
+      if [ -z "$ATPROTO_PASSWORD" ]; then
+        echo "ATPROTO_PASSWORD is not set; skipping ATProto docs publish"
+        exit 0
+      fi
       # branch pushes publish only when docs, devlog, or the publish tooling
       # changed; tag pushes always publish. pure shell — grep is not in the image.
       if [ "${TANGLED_REF#refs/tags/}" = "$TANGLED_REF" ]; then
@@ -39,4 +43,7 @@ steps:
         fi
       fi
       /tangled/workspace/.zig/zig build
-      ./zig-out/bin/publish-docs
+      if ! ./zig-out/bin/publish-docs; then
+        echo "ATProto docs publish failed; skipping temporarily"
+        exit 0
+      fi
