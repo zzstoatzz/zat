@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0-dev.3070+b22eb176b",
     .dependencies = .{
         .websocket = .{
-            .url = "https://github.com/karlseguin/websocket.zig/archive/6d309f7a9790030f2fc070323b5defc64a15c13b.tar.gz",
-            .hash = "websocket-0.1.0-ZPISdV_aBACU9pGuvrTQ2z8uxz_Sp8JnJgQaiGKQIx1l",
+            .url = "https://github.com/zzstoatzz/websocket.zig/archive/refs/tags/v0.1.5.tar.gz",
+            .hash = "websocket-0.1.2-ZPISdUpYBAA-B2Ru4-MN2TLWlTUMcZd3Yu87eLS-et-V",
         },
         .@"atproto-interop-tests" = .{
             .url = "https://github.com/bluesky-social/atproto-interop-tests/archive/35bb5638ab1e5ce71fb88a0c95953fc557ef1925.tar.gz",
