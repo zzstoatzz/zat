@@ -94,6 +94,24 @@ pub fn build(b: *std.Build) void {
     const firehose_smoke_step = b.step("firehose-smoke", "run firehose smoke test (CBOR/CAR/CID on live data)");
     firehose_smoke_step.dependOn(&run_firehose_smoke.step);
 
+    // firehose decodeFrame benchmark over atproto-bench fixtures
+    const firehose_decode_bench = b.addExecutable(.{
+        .name = "firehose-decode-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("scripts/firehose_decode_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "zat", .module = mod }},
+        }),
+    });
+    b.installArtifact(firehose_decode_bench);
+
+    const run_firehose_decode_bench = b.addRunArtifact(firehose_decode_bench);
+    if (b.args) |args| run_firehose_decode_bench.addArgs(args);
+    const firehose_decode_bench_step = b.step("firehose-decode-bench", "benchmark FirehoseClient.decodeFrame over atproto-bench fixtures");
+    firehose_decode_bench_step.dependOn(&run_firehose_decode_bench.step);
+
     // CBOR codec benchmarks
     const cbor_bench = b.addExecutable(.{
         .name = "cbor-bench",

@@ -13,6 +13,7 @@ const std = @import("std");
 const websocket = @import("websocket");
 const cbor = @import("../repo/cbor.zig");
 const car = @import("../repo/car.zig");
+const mst = @import("../repo/mst.zig");
 const sync = @import("sync.zig");
 
 const mem = std.mem;
@@ -40,6 +41,7 @@ pub const Options = struct {
 /// decoded firehose event
 pub const Event = union(enum) {
     commit: CommitEvent,
+    sync: SyncEvent,
     identity: IdentityEvent,
     account: AccountEvent,
     info: InfoEvent,
@@ -47,6 +49,7 @@ pub const Event = union(enum) {
     pub fn seq(self: Event) ?i64 {
         return switch (self) {
             .commit => |c| c.seq,
+            .sync => |s| s.seq,
             .identity => |i| i.seq,
             .account => |a| a.seq,
             .info => null,
@@ -61,17 +64,46 @@ pub const CommitEvent = struct {
     time: []const u8, // datetime — when event was received
     since: ?[]const u8 = null, // TID — rev of preceding commit (null = full repo export)
     commit: ?cbor.Cid = null, // CID of the commit object
+    blocks: []const u8 = &.{}, // raw CAR diff bytes
     ops: []const RepoOp,
+    prev_data: ?cbor.Cid = null, // MST root CID of the previous revision
     blobs: []const cbor.Cid = &.{}, // new blobs referenced by records in this commit
     too_big: bool = false,
+
+    pub fn toMstOperations(self: CommitEvent, allocator: Allocator) Allocator.Error![]mst.Operation {
+        var ops: std.ArrayList(mst.Operation) = .empty;
+        errdefer ops.deinit(allocator);
+        for (self.ops) |op| {
+            const path = if (op.path.len != 0)
+                try allocator.dupe(u8, op.path)
+            else
+                try std.fmt.allocPrint(allocator, "{s}/{s}", .{ op.collection, op.rkey });
+            try ops.append(allocator, .{
+                .path = path,
+                .value = if (op.cid) |cid| cid.raw else null,
+                .prev = if (op.prev) |prev| prev.raw else null,
+            });
+        }
+        return ops.toOwnedSlice(allocator);
+    }
 };
 
 pub const RepoOp = struct {
     action: CommitAction,
+    path: []const u8 = "",
     collection: []const u8,
     rkey: []const u8,
     cid: ?cbor.Cid = null, // CID of the record (null for deletes)
+    prev: ?cbor.Cid = null, // CID of the previous record for updates/deletes
     record: ?cbor.Value = null, // decoded DAG-CBOR record from CAR block
+};
+
+pub const SyncEvent = struct {
+    seq: i64,
+    did: []const u8,
+    rev: []const u8,
+    time: []const u8,
+    blocks: []const u8, // raw CAR bytes containing the current commit object
 };
 
 pub const IdentityEvent = struct {
@@ -132,6 +164,8 @@ pub fn decodeFrame(allocator: Allocator, data: []const u8) DecodeError!Event {
 
     if (mem.eql(u8, t, "#commit")) {
         return try decodeCommit(allocator, payload);
+    } else if (mem.eql(u8, t, "#sync")) {
+        return decodeSync(payload);
     } else if (mem.eql(u8, t, "#identity")) {
         return decodeIdentity(payload);
     } else if (mem.eql(u8, t, "#account")) {
@@ -152,14 +186,9 @@ fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
     const rev = payload.getString("rev") orelse return error.MissingField;
     const time = payload.getString("time") orelse return error.MissingField;
 
-    // parse commit CID
-    var commit_cid: ?cbor.Cid = null;
-    if (payload.get("commit")) |commit_val| {
-        switch (commit_val) {
-            .cid => |c| commit_cid = c,
-            else => {},
-        }
-    }
+    const commit_cid = payload.getCid("commit") orelse return error.MissingField;
+    const blocks_bytes = payload.getBytes("blocks") orelse return error.MissingField;
+    const prev_data = payload.getCid("prevData") orelse return error.MissingField;
 
     // parse blobs array (array of CID links)
     var blobs: std.ArrayList(cbor.Cid) = .empty;
@@ -172,12 +201,9 @@ fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
         }
     }
 
-    // parse CAR blocks
-    const blocks_bytes = payload.getBytes("blocks");
-    var parsed_car: ?car.Car = null;
-    if (blocks_bytes) |b| {
-        parsed_car = car.read(allocator, b) catch null;
-    }
+    // parse CAR blocks for record hydration. CAR verification failure should not
+    // hide the wire event; consumers can reject by verifying `blocks` explicitly.
+    const parsed_car: ?car.Car = car.read(allocator, blocks_bytes) catch null;
 
     // parse ops
     const ops_array = payload.getArray("ops");
@@ -196,6 +222,7 @@ fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
 
             // extract CID from op and look up record from CAR blocks
             var op_cid: ?cbor.Cid = null;
+            var op_prev: ?cbor.Cid = null;
             var record: ?cbor.Value = null;
             if (op_val.get("cid")) |cid_val| {
                 switch (cid_val) {
@@ -210,12 +237,20 @@ fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
                     else => {},
                 }
             }
+            if (op_val.get("prev")) |prev_val| {
+                switch (prev_val) {
+                    .cid => |cid| op_prev = cid,
+                    else => {},
+                }
+            }
 
             try ops.append(allocator, .{
                 .action = action,
+                .path = path,
                 .collection = collection,
                 .rkey = rkey,
                 .cid = op_cid,
+                .prev = op_prev,
                 .record = record,
             });
         }
@@ -228,9 +263,21 @@ fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
         .time = time,
         .since = payload.getString("since"),
         .commit = commit_cid,
+        .blocks = blocks_bytes,
         .ops = try ops.toOwnedSlice(allocator),
+        .prev_data = prev_data,
         .blobs = try blobs.toOwnedSlice(allocator),
         .too_big = payload.getBool("tooBig") orelse false,
+    } };
+}
+
+fn decodeSync(payload: cbor.Value) DecodeError!Event {
+    return .{ .sync = .{
+        .seq = payload.getInt("seq") orelse return error.MissingField,
+        .did = payload.getString("did") orelse return error.MissingField,
+        .rev = payload.getString("rev") orelse return error.MissingField,
+        .time = payload.getString("time") orelse return error.MissingField,
+        .blocks = payload.getBytes("blocks") orelse return error.MissingField,
     } };
 }
 
@@ -263,6 +310,7 @@ pub fn encodeFrame(allocator: Allocator, event: Event) ![]u8 {
 
     const tag = switch (event) {
         .commit => "#commit",
+        .sync => "#sync",
         .identity => "#identity",
         .account => "#account",
         .info => "#info",
@@ -278,6 +326,7 @@ pub fn encodeFrame(allocator: Allocator, event: Event) ![]u8 {
     // encode payload based on event type
     switch (event) {
         .commit => |commit| try encodeCommitPayload(allocator, &aw.writer, commit),
+        .sync => |sync_event| try encodeSyncPayload(allocator, &aw.writer, sync_event),
         .identity => |id| try encodeIdentityPayload(allocator, &aw.writer, id),
         .account => |acct| try encodeAccountPayload(allocator, &aw.writer, acct),
         .info => |inf| try encodeInfoPayload(allocator, &aw.writer, inf),
@@ -297,7 +346,10 @@ fn encodeCommitPayload(allocator: Allocator, writer: anytype, commit: CommitEven
 
     for (commit.ops) |op| {
         const action_str: []const u8 = @tagName(op.action);
-        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ op.collection, op.rkey });
+        const path = if (op.path.len != 0)
+            op.path
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ op.collection, op.rkey });
 
         if (op.record) |record| {
             // encode record, create CID, add to CAR blocks
@@ -313,25 +365,35 @@ fn encodeCommitPayload(allocator: Allocator, writer: anytype, commit: CommitEven
                 try root_cids.append(allocator, cid);
             }
 
-            try op_values.append(allocator, .{ .map = @constCast(&[_]cbor.Value.MapEntry{
-                .{ .key = "action", .value = .{ .text = action_str } },
-                .{ .key = "cid", .value = .{ .cid = cid } },
-                .{ .key = "path", .value = .{ .text = path } },
-            }) });
+            var op_entries: std.ArrayList(cbor.Value.MapEntry) = .empty;
+            defer op_entries.deinit(allocator);
+            try op_entries.append(allocator, .{ .key = "action", .value = .{ .text = action_str } });
+            try op_entries.append(allocator, .{ .key = "cid", .value = .{ .cid = cid } });
+            try op_entries.append(allocator, .{ .key = "path", .value = .{ .text = path } });
+            if (op.prev) |prev| {
+                try op_entries.append(allocator, .{ .key = "prev", .value = .{ .cid = prev } });
+            }
+            try op_values.append(allocator, .{ .map = try op_entries.toOwnedSlice(allocator) });
         } else {
-            try op_values.append(allocator, .{ .map = @constCast(&[_]cbor.Value.MapEntry{
-                .{ .key = "action", .value = .{ .text = action_str } },
-                .{ .key = "path", .value = .{ .text = path } },
-            }) });
+            var op_entries: std.ArrayList(cbor.Value.MapEntry) = .empty;
+            defer op_entries.deinit(allocator);
+            try op_entries.append(allocator, .{ .key = "action", .value = .{ .text = action_str } });
+            try op_entries.append(allocator, .{ .key = "cid", .value = .null });
+            try op_entries.append(allocator, .{ .key = "path", .value = .{ .text = path } });
+            if (op.prev) |prev| {
+                try op_entries.append(allocator, .{ .key = "prev", .value = .{ .cid = prev } });
+            }
+            try op_values.append(allocator, .{ .map = try op_entries.toOwnedSlice(allocator) });
         }
     }
 
-    // build CAR file from blocks
-    const car_data = car.Car{
-        .roots = root_cids.items,
-        .blocks = car_blocks.items,
+    const blocks_bytes = if (commit.blocks.len != 0) commit.blocks else blk: {
+        const car_data = car.Car{
+            .roots = root_cids.items,
+            .blocks = car_blocks.items,
+        };
+        break :blk try car.writeAlloc(allocator, car_data);
     };
-    const blocks_bytes = try car.writeAlloc(allocator, car_data);
 
     // build blobs array
     var blob_values: std.ArrayList(cbor.Value) = .empty;
@@ -345,11 +407,14 @@ fn encodeCommitPayload(allocator: Allocator, writer: anytype, commit: CommitEven
     defer entries.deinit(allocator);
 
     try entries.append(allocator, .{ .key = "blocks", .value = .{ .bytes = blocks_bytes } });
-    if (commit.commit) |c| {
-        try entries.append(allocator, .{ .key = "commit", .value = .{ .cid = c } });
+    if (commit.commit) |commit_cid| {
+        try entries.append(allocator, .{ .key = "commit", .value = .{ .cid = commit_cid } });
     }
     try entries.append(allocator, .{ .key = "blobs", .value = .{ .array = blob_values.items } });
     try entries.append(allocator, .{ .key = "ops", .value = .{ .array = op_values.items } });
+    if (commit.prev_data) |prev_data| {
+        try entries.append(allocator, .{ .key = "prevData", .value = .{ .cid = prev_data } });
+    }
     try entries.append(allocator, .{ .key = "repo", .value = .{ .text = commit.repo } });
     try entries.append(allocator, .{ .key = "rev", .value = .{ .text = commit.rev } });
     try entries.append(allocator, .{ .key = "seq", .value = .{ .unsigned = @intCast(commit.seq) } });
@@ -360,6 +425,19 @@ fn encodeCommitPayload(allocator: Allocator, writer: anytype, commit: CommitEven
     if (commit.too_big) {
         try entries.append(allocator, .{ .key = "tooBig", .value = .{ .boolean = true } });
     }
+
+    try cbor.encode(allocator, writer, .{ .map = entries.items });
+}
+
+fn encodeSyncPayload(allocator: Allocator, writer: anytype, sync_event: SyncEvent) !void {
+    var entries: std.ArrayList(cbor.Value.MapEntry) = .empty;
+    defer entries.deinit(allocator);
+
+    try entries.append(allocator, .{ .key = "blocks", .value = .{ .bytes = sync_event.blocks } });
+    try entries.append(allocator, .{ .key = "did", .value = .{ .text = sync_event.did } });
+    try entries.append(allocator, .{ .key = "rev", .value = .{ .text = sync_event.rev } });
+    try entries.append(allocator, .{ .key = "seq", .value = .{ .unsigned = @intCast(sync_event.seq) } });
+    try entries.append(allocator, .{ .key = "time", .value = .{ .text = sync_event.time } });
 
     try cbor.encode(allocator, writer, .{ .map = entries.items });
 }
@@ -557,8 +635,8 @@ test "decode frame header" {
     // simulate a frame: header {op: 1, t: "#info"} + payload {name: "OutdatedCursor"}
     const header_bytes = [_]u8{
         0xa2, // map(2)
-        0x62, 'o', 'p', 0x01, // "op": 1
         0x61, 't', 0x65, '#', 'i', 'n', 'f', 'o', // "t": "#info"
+        0x62, 'o', 'p', 0x01, // "op": 1
     };
     const payload_bytes = [_]u8{
         0xa1, // map(1)
@@ -681,6 +759,8 @@ test "encode → decode commit frame with record" {
         .{ .key = "$type", .value = .{ .text = "app.bsky.feed.post" } },
         .{ .key = "text", .value = .{ .text = "hello firehose" } },
     } };
+    const commit_cid = try cbor.Cid.forDagCbor(alloc, "commit");
+    const prev_data = try cbor.Cid.forDagCbor(alloc, "prev-data");
 
     const original = Event{ .commit = .{
         .seq = 999,
@@ -688,6 +768,8 @@ test "encode → decode commit frame with record" {
         .rev = "3k2abc000000",
         .time = "2024-01-15T10:30:00Z",
         .since = "3k2abd000000",
+        .commit = commit_cid,
+        .prev_data = prev_data,
         .ops = &.{.{
             .action = .create,
             .collection = "app.bsky.feed.post",
@@ -705,11 +787,15 @@ test "encode → decode commit frame with record" {
     try std.testing.expectEqualStrings("3k2abc000000", commit.rev);
     try std.testing.expectEqualStrings("2024-01-15T10:30:00Z", commit.time);
     try std.testing.expectEqualStrings("3k2abd000000", commit.since.?);
+    try std.testing.expectEqualSlices(u8, commit_cid.raw, commit.commit.?.raw);
+    try std.testing.expect(commit.blocks.len > 0);
+    try std.testing.expectEqualSlices(u8, prev_data.raw, commit.prev_data.?.raw);
     try std.testing.expectEqual(@as(usize, 0), commit.blobs.len);
     try std.testing.expectEqual(@as(usize, 1), commit.ops.len);
 
     const op = commit.ops[0];
     try std.testing.expectEqual(CommitAction.create, op.action);
+    try std.testing.expectEqualStrings("app.bsky.feed.post/3k2abc", op.path);
     try std.testing.expectEqualStrings("app.bsky.feed.post", op.collection);
     try std.testing.expectEqualStrings("3k2abc", op.rkey);
     try std.testing.expect(op.cid != null);
@@ -718,22 +804,34 @@ test "encode → decode commit frame with record" {
     const rec = op.record.?;
     try std.testing.expectEqualStrings("hello firehose", rec.getString("text").?);
     try std.testing.expectEqualStrings("app.bsky.feed.post", rec.getString("$type").?);
+
+    const mst_ops = try commit.toMstOperations(alloc);
+    try std.testing.expectEqual(@as(usize, 1), mst_ops.len);
+    try std.testing.expectEqualStrings("app.bsky.feed.post/3k2abc", mst_ops[0].path);
+    try std.testing.expectEqualSlices(u8, op.cid.?.raw, mst_ops[0].value.?);
+    try std.testing.expect(mst_ops[0].prev == null);
 }
 
 test "encode → decode commit with delete (no record)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
+    const commit_cid = try cbor.Cid.forDagCbor(alloc, "commit");
+    const prev_data = try cbor.Cid.forDagCbor(alloc, "prev-data");
+    const prev_record = try cbor.Cid.forDagCbor(alloc, "prev-record");
 
     const original = Event{ .commit = .{
         .seq = 500,
         .repo = "did:plc:deleter",
         .rev = "3k2xyz000000",
         .time = "2024-01-15T10:30:00Z",
+        .commit = commit_cid,
+        .prev_data = prev_data,
         .ops = &.{.{
             .action = .delete,
             .collection = "app.bsky.feed.post",
             .rkey = "abc123",
+            .prev = prev_record,
             .record = null,
         }},
     } };
@@ -747,5 +845,28 @@ test "encode → decode commit with delete (no record)" {
     try std.testing.expectEqual(@as(usize, 1), decoded.commit.ops.len);
     try std.testing.expectEqual(CommitAction.delete, decoded.commit.ops[0].action);
     try std.testing.expect(decoded.commit.ops[0].cid == null);
+    try std.testing.expectEqualSlices(u8, prev_record.raw, decoded.commit.ops[0].prev.?.raw);
     try std.testing.expect(decoded.commit.ops[0].record == null);
+}
+
+test "encode → decode sync frame" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const original = Event{ .sync = .{
+        .seq = 777,
+        .did = "did:plc:sync",
+        .rev = "3k2sync00000",
+        .time = "2024-01-15T10:30:00Z",
+        .blocks = "car bytes",
+    } };
+
+    const frame = try encodeFrame(alloc, original);
+    const decoded = try decodeFrame(alloc, frame);
+
+    try std.testing.expectEqual(@as(i64, 777), decoded.sync.seq);
+    try std.testing.expectEqualStrings("did:plc:sync", decoded.sync.did);
+    try std.testing.expectEqualStrings("3k2sync00000", decoded.sync.rev);
+    try std.testing.expectEqualStrings("car bytes", decoded.sync.blocks);
 }

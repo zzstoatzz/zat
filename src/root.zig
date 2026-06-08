@@ -48,6 +48,7 @@ pub const CommitVerifyResult = repo_verifier.CommitVerifyResult;
 // sync 1.1: commit diff verification
 pub const MstOperation = mst.Operation;
 pub const Commit = repo_verifier.Commit;
+pub const LoadedCommitCar = repo_verifier.LoadedCommitCar;
 pub const loadCommitFromCAR = repo_verifier.loadCommitFromCAR;
 pub const verifyCommitDiff = repo_verifier.verifyCommitDiff;
 pub const CommitDiffResult = repo_verifier.CommitDiffResult;
@@ -83,5 +84,6 @@ comptime {
         _ = @import("internal/repo/car_test.zig");
         _ = @import("internal/repo/cbor_rfc8949_test.zig");
         _ = @import("internal/repo/mst_test.zig");
+        _ = @import("internal/streaming/firehose.zig");
     }
 }

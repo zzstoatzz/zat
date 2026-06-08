@@ -299,15 +299,17 @@ pub const Commit = struct {
     prev: ?[]const u8, // raw CID bytes — previous commit CID (null for first commit)
 };
 
-/// lightweight: parse CAR, find root block, decode commit CBOR.
-/// no MST loading. reusable for both #commit and #sync frames.
-/// pre-computes unsigned commit bytes for signature verification (avoids re-decode).
-pub fn loadCommitFromCAR(allocator: Allocator, car_bytes: []const u8) !struct {
+pub const LoadedCommitCar = struct {
     commit: Commit,
     commit_cid: []const u8,
     unsigned_commit_bytes: []const u8,
     repo_car: car.Car,
-} {
+};
+
+/// lightweight: parse CAR, find root block, decode commit CBOR.
+/// no MST loading. reusable for both #commit and #sync frames.
+/// pre-computes unsigned commit bytes for signature verification (avoids re-decode).
+pub fn loadCommitFromCAR(allocator: Allocator, car_bytes: []const u8) !LoadedCommitCar {
     const repo_car = car.readWithOptions(allocator, car_bytes, .{}) catch return error.InvalidCommit;
     if (repo_car.roots.len == 0) return error.NoRootsInCar;
 
