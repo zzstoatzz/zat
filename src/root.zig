@@ -53,10 +53,6 @@ pub const loadCommitFromCAR = repo_verifier.loadCommitFromCAR;
 pub const verifyCommitDiff = repo_verifier.verifyCommitDiff;
 pub const CommitDiffResult = repo_verifier.CommitDiffResult;
 
-// websocket transport (re-exported so dependents share zat's single pinned
-// version instead of taking a direct dependency)
-pub const websocket = @import("websocket");
-
 // sync / streaming
 const sync = @import("internal/streaming/sync.zig");
 pub const CommitAction = sync.CommitAction;
