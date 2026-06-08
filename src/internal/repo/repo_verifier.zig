@@ -448,6 +448,7 @@ pub fn verifyCommitDiff(
             error.OutOfMemory, error.WriteFailed => return error.OutOfMemory,
             error.InversionMismatch => return error.InversionMismatch,
             error.PartialTree => return error.PartialTree,
+            else => return error.InvalidMstNode,
         };
     }
 
@@ -581,3 +582,9 @@ test "loadCommitFromCAR extracts commit fields" {
 //     try std.testing.expect(result.record_count > 0);
 //     std.debug.print("verified pfrazee.com: {d} records, rev={s}\n", .{ result.record_count, result.commit_rev });
 // }
+
+test "verifyCommitDiff is semantically analyzed (error-set exhaustiveness)" {
+    // forces full body analysis so a non-exhaustive error switch (e.g. the
+    // invertOp catch) is caught here rather than only in a downstream consumer.
+    _ = &verifyCommitDiff;
+}
