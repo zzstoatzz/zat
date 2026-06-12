@@ -502,9 +502,12 @@ pub const Mst = struct {
             else => return error.PartialTree,
         };
         const encoded = try self.serializeNode(loaded);
-        defer self.allocator.free(encoded);
         const cid = try cbor.Cid.forDagCbor(self.allocator, encoded);
         loaded.cid = .{ .raw = try self.allocator.dupe(u8, cid.raw) };
+        // cache the encoding alongside the cid: anything that clears `dirty`
+        // after serializing MUST keep the (cid, encoded) pair consistent, or
+        // a later collectBlocks emits the new cid with stale bytes
+        loaded.encoded = encoded;
         loaded.dirty = false;
         return cid;
     }
@@ -1896,4 +1899,36 @@ test "parseCidString" {
     try std.testing.expectEqual(@as(u64, 0x71), cid.codec().?);
     try std.testing.expectEqual(@as(u64, 0x12), cid.hashFn().?);
     try std.testing.expectEqual(@as(usize, 32), cid.digest().?.len);
+}
+
+test "collectBlocks emits consistent (cid, data) pairs across repeated commit cycles" {
+    // regression: nodeCid (the rootCid path) re-serialized dirty nodes and
+    // cleared `dirty` without refreshing the cached encoding, so the next
+    // collectBlocks paired the new cid with stale bytes — BadBlockHash on
+    // any CAR reload after the second commit.
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tree = Mst.init(arena);
+    var round: usize = 0;
+    while (round < 5) : (round += 1) {
+        var key_buf: [32]u8 = undefined;
+        const key = try std.fmt.bufPrint(&key_buf, "io.test.rec/key-{d:0>3}", .{round});
+        var data_buf: [8]u8 = undefined;
+        const data = try std.fmt.bufPrint(&data_buf, "v{d}", .{round});
+        const value_cid = try cbor.Cid.forDagCbor(arena, data);
+        try tree.put(key, value_cid);
+
+        // the commit sequence: rootCid first (marks nodes clean), then collect
+        _ = try tree.rootCid();
+        var blocks: std.ArrayList(car.Block) = .empty;
+        try tree.collectBlocks(&blocks);
+
+        for (blocks.items) |block| {
+            const computed = try cbor.Cid.forDagCbor(arena, block.data);
+            try testing.expect(std.mem.eql(u8, computed.raw, block.cid_raw));
+        }
+    }
 }
