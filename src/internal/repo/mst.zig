@@ -110,6 +110,12 @@ pub const Node = struct {
     layer: u32,
     dirty: bool,
     cid: ?cbor.Cid,
+    /// dag-cbor encoding cached by the last collectBlocks pass. only
+    /// meaningful while `dirty` is false — mutation marks the node dirty,
+    /// which invalidates this implicitly. without the cache, every
+    /// collectBlocks re-serializes the entire tree, which makes repeated
+    /// commit/collect cycles quadratic in allocations.
+    encoded: ?[]const u8,
 
     pub const Entry = struct {
         key: []const u8,
@@ -124,6 +130,7 @@ pub const Node = struct {
             .layer = layer,
             .dirty = dirty,
             .cid = null,
+            .encoded = null,
         };
     }
 };
@@ -447,15 +454,22 @@ pub const Mst = struct {
     /// held elsewhere. This is the shape needed for commit CAR construction,
     /// where only the newly materialized path needs to be emitted.
     pub fn collectBlocks(self: *Mst, out: *std.ArrayList(car.Block)) MstError!void {
+        return self.collectBlocksInto(self.allocator, out);
+    }
+
+    /// like `collectBlocks`, but the output list grows with `gpa` instead
+    /// of the tree's allocator. callers collecting per-commit into scratch
+    /// memory use this to keep list growth out of the tree's arena.
+    pub fn collectBlocksInto(self: *Mst, gpa: Allocator, out: *std.ArrayList(car.Block)) MstError!void {
         if (self.root) |root| {
-            try self.collectNodeBlocks(root, out);
+            try self.collectNodeBlocks(root, gpa, out);
             return;
         }
 
         const encoded = try self.serializeEmptyNode();
         errdefer self.allocator.free(encoded);
         const cid = try cbor.Cid.forDagCbor(self.allocator, encoded);
-        try out.append(self.allocator, .{
+        try out.append(gpa, .{
             .cid_raw = try self.allocator.dupe(u8, cid.raw),
             .data = encoded,
         });
@@ -495,7 +509,7 @@ pub const Mst = struct {
         return cid;
     }
 
-    fn collectNodeBlocks(self: *Mst, node: *Node, out: *std.ArrayList(car.Block)) MstError!void {
+    fn collectNodeBlocks(self: *Mst, node: *Node, gpa: Allocator, out: *std.ArrayList(car.Block)) MstError!void {
         if (isUnloadedStub(node)) return;
 
         const loaded = self.ensureNodeLoaded(node) catch |err| switch (err) {
@@ -504,18 +518,29 @@ pub const Mst = struct {
             else => return error.PartialTree,
         };
 
-        if (loaded.left) |left| try self.collectNodeBlocks(left, out);
+        if (loaded.left) |left| try self.collectNodeBlocks(left, gpa, out);
         for (loaded.entries.items) |entry| {
-            if (entry.right) |right| try self.collectNodeBlocks(right, out);
+            if (entry.right) |right| try self.collectNodeBlocks(right, gpa, out);
+        }
+
+        // clean node with a cached encoding: reuse, no allocation
+        if (!loaded.dirty) {
+            if (loaded.cid) |cid| {
+                if (loaded.encoded) |enc| {
+                    try out.append(gpa, .{ .cid_raw = cid.raw, .data = enc });
+                    return;
+                }
+            }
         }
 
         const encoded = try self.serializeNode(loaded);
         errdefer self.allocator.free(encoded);
         const cid = try cbor.Cid.forDagCbor(self.allocator, encoded);
-        loaded.cid = .{ .raw = try self.allocator.dupe(u8, cid.raw) };
+        loaded.cid = cid;
+        loaded.encoded = encoded;
         loaded.dirty = false;
-        try out.append(self.allocator, .{
-            .cid_raw = try self.allocator.dupe(u8, cid.raw),
+        try out.append(gpa, .{
+            .cid_raw = cid.raw,
             .data = encoded,
         });
     }
