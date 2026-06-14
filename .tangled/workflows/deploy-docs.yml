@@ -22,7 +22,6 @@ steps:
 
   - name: deploy docs to wisp
     command: |
-      set -e
       if [ -z "$WISP_APP_PASSWORD" ]; then
         echo "WISP_APP_PASSWORD is not set; cannot deploy docs" >&2
         exit 1
@@ -35,4 +34,12 @@ steps:
       if [ -n "$INTERP" ]; then
         patchelf --set-interpreter "$INTERP" --set-rpath "$(dirname "$INTERP")" wisp-cli
       fi
+      # run to completion so wisp-cli's output flushes to the log, then fail
+      # loudly on its exit code — `set -e` here would abort mid-step and the
+      # error (e.g. auth failure) would never reach the log.
       ./wisp-cli deploy "$WISP_DID" --path ./site-out --site "$WISP_SITE_NAME" --password "$WISP_APP_PASSWORD"
+      rc=$?
+      if [ "$rc" -ne 0 ]; then
+        echo "wisp docs deploy failed (wisp-cli exit $rc)" >&2
+        exit "$rc"
+      fi
