@@ -163,6 +163,41 @@ ES256 (P-256) and ES256K (secp256k1) with low-S normalization. RFC 6979 determin
 </details>
 
 <details>
+<summary><strong>OAuth client helpers</strong> - ATProto OAuth ceremony without app storage policy</summary>
+
+```zig
+var transport = zat.HttpTransport.init(io, allocator);
+defer transport.deinit();
+
+const authserver = try zat.oauth.discoverAuthorizationServer(allocator, &transport, pds_url);
+defer allocator.free(authserver);
+
+var metadata = try zat.oauth.fetchAuthorizationServerMetadata(allocator, &transport, authserver);
+defer metadata.deinit(allocator);
+
+var secrets = try zat.oauth.prepareAuthRequestSecrets(allocator, io);
+defer secrets.deinit(allocator);
+
+var par = try zat.oauth.sendParRequest(allocator, io, &transport, .{
+    .par_url = metadata.pushed_authorization_request_endpoint,
+    .authserver_issuer = metadata.issuer,
+    .client_id = client_id,
+    .redirect_uri = redirect_uri,
+    .scope = "atproto repo:example.app.record",
+    .state = secrets.state,
+    .pkce_challenge = secrets.pkce_challenge,
+    .login_hint = handle,
+    .client_keypair = &client_keypair,
+    .dpop_keypair = &secrets.dpop_keypair,
+});
+defer par.deinit(allocator);
+```
+
+also includes client metadata JSON generation, authorization URL formatting, code/refresh token exchange, DPoP nonce retry, and DPoP-authenticated resource requests. cookies, sessions, redirects, and persistence stay with your application or web framework.
+
+</details>
+
+<details>
 <summary><strong>repo verification</strong> - full AT Protocol trust chain</summary>
 
 ```zig

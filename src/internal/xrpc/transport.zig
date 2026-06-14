@@ -166,6 +166,11 @@ pub const HttpTransport = struct {
         response: *std.http.Client.Response,
     ) !FetchResult {
         const rate_limit = RateLimitHeaders.fromResponseHead(response.head);
+        var oauth = if (options.capture_response_headers)
+            try OAuthHeaders.fromResponseHead(self.allocator, response.head)
+        else
+            OAuthHeaders{};
+        errdefer oauth.deinit(self.allocator);
 
         if (options.max_response_size) |max| {
             const body_buf = try self.allocator.alloc(u8, max);
@@ -176,6 +181,7 @@ pub const HttpTransport = struct {
                 .status = response.head.status,
                 .body = try self.allocator.dupe(u8, writer.buffered()),
                 .rate_limit = rate_limit,
+                .oauth = oauth,
             };
         }
 
@@ -186,6 +192,7 @@ pub const HttpTransport = struct {
             .status = response.head.status,
             .body = try self.allocator.dupe(u8, aw.written()),
             .rate_limit = rate_limit,
+            .oauth = oauth,
         };
     }
 
@@ -200,6 +207,7 @@ pub const HttpTransport = struct {
         max_response_size: ?usize = null,
         redirect_behavior: ?std.http.Client.Request.RedirectBehavior = null,
         resolved_connection: ?ResolvedConnection = null,
+        capture_response_headers: bool = false,
     };
 
     pub const ResolvedConnection = struct {
@@ -213,6 +221,41 @@ pub const HttpTransport = struct {
         status: std.http.Status,
         body: []u8,
         rate_limit: RateLimitHeaders = .{},
+        oauth: OAuthHeaders = .{},
+
+        pub fn deinit(self: *FetchResult, allocator: std.mem.Allocator) void {
+            allocator.free(self.body);
+            self.oauth.deinit(allocator);
+        }
+    };
+
+    pub const OAuthHeaders = struct {
+        content_type: ?[]const u8 = null,
+        dpop_nonce: ?[]const u8 = null,
+        www_authenticate: ?[]const u8 = null,
+
+        pub fn fromResponseHead(allocator: std.mem.Allocator, head: std.http.Client.Response.Head) !OAuthHeaders {
+            var result: OAuthHeaders = .{};
+            errdefer result.deinit(allocator);
+            var it = head.iterateHeaders();
+            while (it.next()) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "content-type")) {
+                    result.content_type = try allocator.dupe(u8, header.value);
+                } else if (std.ascii.eqlIgnoreCase(header.name, "dpop-nonce")) {
+                    result.dpop_nonce = try allocator.dupe(u8, header.value);
+                } else if (std.ascii.eqlIgnoreCase(header.name, "www-authenticate")) {
+                    result.www_authenticate = try allocator.dupe(u8, header.value);
+                }
+            }
+            return result;
+        }
+
+        pub fn deinit(self: *OAuthHeaders, allocator: std.mem.Allocator) void {
+            if (self.content_type) |value| allocator.free(value);
+            if (self.dpop_nonce) |value| allocator.free(value);
+            if (self.www_authenticate) |value| allocator.free(value);
+            self.* = .{};
+        }
     };
 
     pub const RateLimitHeaders = struct {
@@ -317,4 +360,28 @@ test "transport parses rate limit headers" {
     try std.testing.expectEqual(@as(?u64, 1710000000), headers.reset);
     try std.testing.expectEqual(@as(?u64, 2), headers.retry_after);
     try std.testing.expect(!headers.isEmpty());
+}
+
+test "transport parses oauth headers" {
+    const response_bytes = "HTTP/1.1 401 Unauthorized\r\n" ++
+        "DPoP-Nonce: nonce-123\r\n" ++
+        "WWW-Authenticate: DPoP error=\"use_dpop_nonce\"\r\n\r\n";
+
+    const head = try std.http.Client.Response.Head.parse(response_bytes);
+    var headers = try HttpTransport.OAuthHeaders.fromResponseHead(std.testing.allocator, head);
+    defer headers.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("nonce-123", headers.dpop_nonce.?);
+    try std.testing.expectEqualStrings("DPoP error=\"use_dpop_nonce\"", headers.www_authenticate.?);
+}
+
+test "transport parses oauth content type header" {
+    const response_bytes = "HTTP/1.1 200 OK\r\n" ++
+        "Content-Type: application/json; charset=utf-8\r\n\r\n";
+
+    const head = try std.http.Client.Response.Head.parse(response_bytes);
+    var headers = try HttpTransport.OAuthHeaders.fromResponseHead(std.testing.allocator, head);
+    defer headers.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("application/json; charset=utf-8", headers.content_type.?);
 }

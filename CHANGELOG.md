@@ -1,5 +1,11 @@
 # changelog
 
+## 0.3.6
+
+- **feat**: expand `zat.oauth` from low-level PKCE/DPoP/client-assertion helpers into a framework-neutral ATProto OAuth client toolkit. New helpers cover client metadata JSON, authorization-server discovery, authorization URL construction, PAR, code exchange, refresh-token exchange, DPoP nonce retry, and DPoP-authenticated resource requests while leaving cookies, redirects, sessions, and storage policy to applications.
+- **fix**: enforce ATProto OAuth profile requirements for metadata discovery, scopes, DPoP nonces, and DPoP `htu` normalization, with focused tests for the new correctness surface.
+- **feat**: `HttpTransport.FetchResult` can capture OAuth-relevant response headers (`Content-Type`, `DPoP-Nonce`, `WWW-Authenticate`) and has a `deinit` helper so OAuth clients can stay on the shared transport path instead of dropping to raw `std.http.Client`.
+
 ## 0.3.5
 
 - **feat**: firehose `#commit` events now expose the raw `blocks` CAR bytes, `prevData`, operation `prev` CIDs, and a `toMstOperations()` helper so consumers can call `verifyCommitDiff`/`verifyCommitCar` without re-decoding raw frames. Added `#sync` event decoding and a named `LoadedCommitCar` return type for `loadCommitFromCAR`.
