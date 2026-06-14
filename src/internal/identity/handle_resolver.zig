@@ -116,11 +116,18 @@ pub const HandleResolver = struct {
             return error.DnsResolutionFailed;
         }
 
+        return self.didFromDohBody(result.body);
+    }
+
+    /// parse a Cloudflare DoH JSON body and extract the first valid `did=` TXT value.
+    fn didFromDohBody(self: *HandleResolver, body: []const u8) ![]const u8 {
+        // Cloudflare appends an unknown `Comment` field for DNSSEC zones, so the
+        // parse must tolerate fields `DnsResponse` doesn't declare.
         const parsed = std.json.parseFromSlice(
             DnsResponse,
             self.allocator,
-            result.body,
-            .{},
+            body,
+            .{ .ignore_unknown_fields = true },
         ) catch return error.InvalidDnsResponse;
         defer parsed.deinit();
 
@@ -181,6 +188,26 @@ const Answer = struct {
 
 // === integration tests ===
 // these actually hit the network - run with: zig test src/internal/handle_resolver.zig
+
+test "didFromDohBody tolerates Cloudflare DNSSEC Comment field" {
+    var resolver = HandleResolver.init(std.Options.debug_io, std.testing.allocator);
+    defer resolver.deinit();
+
+    // real Cloudflare DoH body for `_atproto.dholms.at`: includes a `Comment`
+    // field that `DnsResponse` doesn't declare (regression for strict parse).
+    const body =
+        \\{"Status":0,"TC":false,"RD":true,"RA":true,"AD":false,"CD":false,
+        \\ "Question":[{"name":"_atproto.dholms.at","type":16}],
+        \\ "Answer":[{"name":"_atproto.dholms.at","type":16,"TTL":3600,
+        \\            "data":"\"did=did:plc:yk4dd2qkboz2yv6tpubpc6co\""}],
+        \\ "Comment":["EDE(10): RRSIGs Missing for DNSKEY at., id = 1253"]}
+    ;
+
+    const did = try resolver.didFromDohBody(body);
+    defer std.testing.allocator.free(did);
+
+    try std.testing.expectEqualStrings("did:plc:yk4dd2qkboz2yv6tpubpc6co", did);
+}
 
 test "resolve handle (http) - integration" {
     // use arena for http client internals that may leak

@@ -1,5 +1,10 @@
 # changelog
 
+## 0.3.7
+
+- **fix**: `HandleResolver` DNS-over-HTTPS resolution no longer fails for handles in DNSSEC zones. Cloudflare appends a `Comment` field to DoH JSON for those zones (e.g. `dholms.at`), which the strict parse rejected with `error.InvalidDnsResponse`; the parse now ignores unknown fields. Added a network-free regression test using a real Cloudflare DNSSEC body.
+- **perf**: MST `collectBlocks` caches node encodings across passes and keeps the `(cid, encoded)` cache consistent in `nodeCid`, avoiding redundant DAG-CBOR re-serialization when gathering commit blocks.
+
 ## 0.3.6
 
 - **feat**: expand `zat.oauth` from low-level PKCE/DPoP/client-assertion helpers into a framework-neutral ATProto OAuth client toolkit. New helpers cover client metadata JSON, authorization-server discovery, authorization URL construction, PAR, code exchange, refresh-token exchange, DPoP nonce retry, and DPoP-authenticated resource requests while leaving cookies, redirects, sessions, and storage policy to applications.
