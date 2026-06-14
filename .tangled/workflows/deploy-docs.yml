@@ -22,9 +22,10 @@ steps:
 
   - name: deploy docs to wisp
     command: |
+      set -e
       if [ -z "$WISP_APP_PASSWORD" ]; then
-        echo "WISP_APP_PASSWORD is not set; skipping wisp docs deploy"
-        exit 0
+        echo "WISP_APP_PASSWORD is not set; cannot deploy docs" >&2
+        exit 1
       fi
       curl -sSL https://sites.wisp.place/nekomimi.pet/wisp-cli-binaries/wisp-cli-x86_64-linux -o wisp-cli
       chmod +x wisp-cli
@@ -34,7 +35,4 @@ steps:
       if [ -n "$INTERP" ]; then
         patchelf --set-interpreter "$INTERP" --set-rpath "$(dirname "$INTERP")" wisp-cli
       fi
-      if ! ./wisp-cli deploy "$WISP_DID" --path ./site-out --site "$WISP_SITE_NAME" --password "$WISP_APP_PASSWORD"; then
-        echo "wisp docs deploy failed; skipping temporarily"
-        exit 0
-      fi
+      ./wisp-cli deploy "$WISP_DID" --path ./site-out --site "$WISP_SITE_NAME" --password "$WISP_APP_PASSWORD"
