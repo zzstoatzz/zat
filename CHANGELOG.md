@@ -2,19 +2,19 @@
 
 ## 0.3.7
 
+- **feat**: expand `zat.oauth` from low-level PKCE/DPoP/client-assertion helpers into a framework-neutral ATProto OAuth client toolkit. New helpers cover client metadata JSON, authorization-server discovery, authorization URL construction, PAR, code exchange, refresh-token exchange, DPoP nonce retry, and DPoP-authenticated resource requests while leaving cookies, redirects, sessions, and storage policy to applications.
+- **fix**: enforce ATProto OAuth profile requirements for metadata discovery, scopes, DPoP nonces, and DPoP `htu` normalization, with focused tests for the new correctness surface.
+- **feat**: `HttpTransport.FetchResult` can capture OAuth-relevant response headers (`Content-Type`, `DPoP-Nonce`, `WWW-Authenticate`) and has a `deinit` helper so OAuth clients can stay on the shared transport path instead of dropping to raw `std.http.Client`.
 - **fix**: `HandleResolver` DNS-over-HTTPS resolution no longer fails for handles in DNSSEC zones. Cloudflare appends a `Comment` field to DoH JSON for those zones (e.g. `dholms.at`), which the strict parse rejected with `error.InvalidDnsResponse`; the parse now ignores unknown fields. Added a network-free regression test using a real Cloudflare DNSSEC body.
 - **perf**: MST `collectBlocks` caches node encodings across passes and keeps the `(cid, encoded)` cache consistent in `nodeCid`, avoiding redundant DAG-CBOR re-serialization when gathering commit blocks.
 
 ## 0.3.6
 
-- **feat**: expand `zat.oauth` from low-level PKCE/DPoP/client-assertion helpers into a framework-neutral ATProto OAuth client toolkit. New helpers cover client metadata JSON, authorization-server discovery, authorization URL construction, PAR, code exchange, refresh-token exchange, DPoP nonce retry, and DPoP-authenticated resource requests while leaving cookies, redirects, sessions, and storage policy to applications.
-- **fix**: enforce ATProto OAuth profile requirements for metadata discovery, scopes, DPoP nonces, and DPoP `htu` normalization, with focused tests for the new correctness surface.
-- **feat**: `HttpTransport.FetchResult` can capture OAuth-relevant response headers (`Content-Type`, `DPoP-Nonce`, `WWW-Authenticate`) and has a `deinit` helper so OAuth clients can stay on the shared transport path instead of dropping to raw `std.http.Client`.
+- **feat**: firehose `#commit` events now expose the raw `blocks` CAR bytes, `prevData`, operation `prev` CIDs, and a `toMstOperations()` helper so consumers can call `verifyCommitDiff`/`verifyCommitCar` without re-decoding raw frames. Added `#sync` event decoding and a named `LoadedCommitCar` return type for `loadCommitFromCAR`.
+- **bench**: added `zig build firehose-decode-bench -- <atproto-bench firehose-frames.bin>` for measuring `FirehoseClient.decodeFrame` directly against the atproto-bench fixture corpus.
 
 ## 0.3.5
 
-- **feat**: firehose `#commit` events now expose the raw `blocks` CAR bytes, `prevData`, operation `prev` CIDs, and a `toMstOperations()` helper so consumers can call `verifyCommitDiff`/`verifyCommitCar` without re-decoding raw frames. Added `#sync` event decoding and a named `LoadedCommitCar` return type for `loadCommitFromCAR`.
-- **bench**: added `zig build firehose-decode-bench -- <atproto-bench firehose-frames.bin>` for measuring `FirehoseClient.decodeFrame` directly against the atproto-bench fixture corpus.
 - **perf**: align MST hot paths with Atmos while preserving AT Protocol root parity. The tree now uses nullable child pointers with CID-only lazy stubs, direct DAG-CBOR node serialization, cached clean-node CIDs, chunked key comparison, borrowed-key insertion for benchmark/import paths, and Atmos-style ordered-tree lookup that loads only selected lazy child nodes. The atproto-bench apples-to-apples MST run now has Zat ahead of Atmos on both insert+root and lookup while producing the same root bytes.
 - **feat**: `Mst.collectBlocks` and `Mst.walk` add the missing middle layer for consumers that need commit-CAR MST blocks or ordered repo traversal without reaching through `Node` internals. This is additive public API; existing callers should not break.
 - **test**: ZDS main now consumes the new MST middle layer in record writes and repo import, pinned to Zat commit `485f1d485a9b8e7b703e8627a6b6a8c3e3c36a0e`, and is deployed as `atcr.io/zat.dev/zds:latest` from merged ZDS commit `8d1a8182dace`.

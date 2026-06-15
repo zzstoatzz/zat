@@ -12,21 +12,39 @@ const docs = [_]DocEntry{
     .{ .path = "/changelog", .file = "CHANGELOG.md" },
 };
 
-/// devlog entries
-const devlog = [_]DocEntry{
-    .{ .path = "/devlog/001", .file = "devlog/001-self-publishing-docs.md" },
-    .{ .path = "/devlog/002", .file = "devlog/002-firehose-and-benchmarks.md" },
-    .{ .path = "/devlog/003", .file = "devlog/003-trust-chain.md" },
-    .{ .path = "/devlog/004", .file = "devlog/004-sig-verify.md" },
-    .{ .path = "/devlog/005", .file = "devlog/005-three-way-verify.md" },
-    .{ .path = "/devlog/006", .file = "devlog/006-building-a-relay.md" },
-    .{ .path = "/devlog/007", .file = "devlog/007-up-and-to-the-right.md" },
-    .{ .path = "/devlog/008", .file = "devlog/008-the-io-migration.md" },
-    .{ .path = "/devlog/009", .file = "devlog/009-back-to-threads.md" },
-    .{ .path = "/devlog/010", .file = "devlog/010-the-network-is-input.md" },
-    .{ .path = "/devlog/011", .file = "devlog/011-building-a-pds.md" },
-    .{ .path = "/devlog/012", .file = "devlog/012-mst-bench-notes.md" },
-};
+/// discover devlog entries from the `devlog/` dir so the published document
+/// records stay in sync with the site builder (which also discovers them) — a
+/// hard-coded list silently drifts every time a new entry lands.
+fn discoverDevlog(allocator: Allocator, io: std.Io) ![]DocEntry {
+    var dir = try std.Io.Dir.cwd().openDir(io, "devlog", .{ .iterate = true });
+    defer dir.close(io);
+
+    var names: std.ArrayList([]const u8) = .empty;
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".md")) continue;
+        if (entry.name.len == 0 or !std.ascii.isDigit(entry.name[0])) continue;
+        try names.append(allocator, try allocator.dupe(u8, entry.name));
+    }
+
+    // sort by filename so the `NNN-` numeric prefix orders chronologically
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+
+    var entries: std.ArrayList(DocEntry) = .empty;
+    for (names.items) |name| {
+        const dash = std.mem.indexOfScalar(u8, name, '-') orelse continue;
+        entries.append(allocator, .{
+            .path = try std.fmt.allocPrint(allocator, "/devlog/{s}", .{name[0..dash]}),
+            .file = try std.fmt.allocPrint(allocator, "devlog/{s}", .{name}),
+        }) catch unreachable;
+    }
+    return entries.toOwnedSlice(allocator);
+}
 
 pub fn main() !void {
     // use page_allocator for CLI tool - OS reclaims on exit
@@ -91,7 +109,8 @@ pub fn main() !void {
     try devlog_uri_buf.print(allocator, "at://{s}/site.standard.publication/{s}", .{ session.did, devlog_tid.str() });
     const devlog_uri = devlog_uri_buf.items;
 
-    try publishEntries(&client, allocator, session.did, &devlog, devlog_uri, 101, &now);
+    const devlog = try discoverDevlog(allocator, std.Options.debug_io);
+    try publishEntries(&client, allocator, session.did, devlog, devlog_uri, 101, &now);
 
     std.debug.print("done\n", .{});
 }
