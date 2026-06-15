@@ -36,6 +36,7 @@ the library covers the full AT Protocol verification pipeline: identity resoluti
 near-term:
 - keep validating the v0.3.x surface in production consumers
 - promote repeated downstream patterns into the library once they prove stable
+- candidates surfaced by the `publish-docs` showcase, which still hand-rolls plumbing on top of `XrpcClient`: typed `com.atproto.repo` write helpers (`createRecord` / `putRecord` / `applyWrites`) and a `Tid.now(io)` constructor (today only `fromTimestamp` exists). session/login stays app-specific — see "maybe later".
 
 what's missing will show up when people build things. until then, no speculative features.
 

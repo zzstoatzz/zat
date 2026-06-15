@@ -1,25 +1,117 @@
+//! publish zat's docs to its ATProto repo as `site.standard` records.
+//!
+//! a small but complete showcase of the library: resolve the account's PDS
+//! from its DID document, authenticate, and replace the published record set in
+//! one atomic `applyWrites` transaction — using zat's checked XRPC API so
+//! protocol errors arrive as typed `XrpcError`s rather than opaque bodies.
+
 const std = @import("std");
 const zat = @import("zat");
 
 const Allocator = std.mem.Allocator;
 
-const DocEntry = struct { path: []const u8, file: []const u8 };
+const handle = "zat.dev";
+const publication_collection = "site.standard.publication";
+const document_collection = "site.standard.document";
 
-/// docs to publish as site.standard.document records
+/// a document to publish: its record key, site path, and source file.
+const DocEntry = struct { rkey: []const u8, path: []const u8, file: []const u8 };
+
+/// top-level docs, with stable record keys derived from their site path.
 const docs = [_]DocEntry{
-    .{ .path = "/", .file = "README.md" },
-    .{ .path = "/roadmap", .file = "docs/roadmap.md" },
-    .{ .path = "/changelog", .file = "CHANGELOG.md" },
+    .{ .rkey = "home", .path = "/", .file = "README.md" },
+    .{ .rkey = "roadmap", .path = "/roadmap", .file = "docs/roadmap.md" },
+    .{ .rkey = "changelog", .path = "/changelog", .file = "CHANGELOG.md" },
 };
+
+const Publication = struct {
+    @"$type": []const u8 = publication_collection,
+    url: []const u8,
+    name: []const u8,
+    description: ?[]const u8 = null,
+};
+
+const Document = struct {
+    @"$type": []const u8 = document_collection,
+    site: []const u8,
+    title: []const u8,
+    path: ?[]const u8 = null,
+    textContent: ?[]const u8 = null,
+    publishedAt: []const u8,
+};
+
+pub fn main() !void {
+    // short-lived CLI: an arena frees everything at exit, so the body can focus
+    // on the protocol rather than on lifetimes.
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.Options.debug_io;
+
+    const password = std.mem.span(std.c.getenv("ATPROTO_PASSWORD") orelse {
+        std.debug.print("error: ATPROTO_PASSWORD not set\n", .{});
+        return error.MissingEnv;
+    });
+
+    // resolve the account's current PDS from its DID document so a future PDS
+    // migration can't point this at a stale host. ATPROTO_PDS overrides.
+    const pds = if (std.c.getenv("ATPROTO_PDS")) |p|
+        std.mem.span(p)
+    else
+        try resolvePds(allocator, io, handle);
+    std.debug.print("publishing to pds {s}\n", .{pds});
+
+    var client = zat.XrpcClient.init(io, allocator, pds);
+    defer client.deinit();
+
+    const did = try login(&client, allocator, handle, password);
+    std.debug.print("authenticated as {s}\n", .{did});
+
+    // the two publications documents are grouped under, with stable rkeys.
+    const site_uri = try std.fmt.allocPrint(allocator, "at://{s}/{s}/site", .{ did, publication_collection });
+    const devlog_uri = try std.fmt.allocPrint(allocator, "at://{s}/{s}/devlog", .{ did, publication_collection });
+
+    const published_at = try nowIso8601(allocator, io);
+
+    // assemble the full desired record set as applyWrites create operations.
+    var creates: std.ArrayList([]const u8) = .empty;
+
+    try creates.append(allocator, try createOp(allocator, publication_collection, "site", Publication{
+        .url = "https://zat.dev",
+        .name = "zat",
+        .description = "AT Protocol building blocks for zig",
+    }));
+    try creates.append(allocator, try createOp(allocator, publication_collection, "devlog", Publication{
+        .url = "https://zat.dev/#devlog/index",
+        .name = "zat devlog",
+        .description = "building zat in public",
+    }));
+
+    for (&docs) |entry| try appendDocument(allocator, io, &creates, entry, site_uri, published_at);
+    for (try discoverDevlog(allocator, io)) |entry| try appendDocument(allocator, io, &creates, entry, devlog_uri, published_at);
+
+    // swap the published set atomically: delete whatever's there now (including
+    // any records under the old key scheme), then write the desired set. two
+    // transactions keep each one free of same-key delete+create conflicts.
+    var deletes: std.ArrayList([]const u8) = .empty;
+    try appendDeletesFor(&client, allocator, did, publication_collection, &deletes);
+    try appendDeletesFor(&client, allocator, did, document_collection, &deletes);
+    if (deletes.items.len > 0) {
+        try applyWrites(&client, allocator, did, deletes.items);
+        std.debug.print("cleaned up {d} existing record(s)\n", .{deletes.items.len});
+    }
+
+    try applyWrites(&client, allocator, did, creates.items);
+    std.debug.print("published {d} record(s)\n", .{creates.items.len});
+}
 
 /// resolve the PDS service endpoint for a handle via its DID document.
 fn resolvePds(allocator: Allocator, io: std.Io, handle_str: []const u8) ![]const u8 {
-    const handle = zat.Handle.parse(handle_str) orelse return error.InvalidHandle;
+    const parsed_handle = zat.Handle.parse(handle_str) orelse return error.InvalidHandle;
 
     var handle_resolver = zat.HandleResolver.init(io, allocator);
     defer handle_resolver.deinit();
-    const did_str = try handle_resolver.resolve(handle);
-    defer allocator.free(did_str);
+    const did_str = try handle_resolver.resolve(parsed_handle);
 
     const did = zat.Did.parse(did_str) orelse return error.InvalidDid;
 
@@ -29,12 +121,57 @@ fn resolvePds(allocator: Allocator, io: std.Io, handle_str: []const u8) ![]const
     defer doc.deinit();
 
     const pds = doc.pdsEndpoint() orelse return error.NoPdsEndpoint;
-    return try allocator.dupe(u8, pds);
+    return allocator.dupe(u8, pds);
 }
 
-/// discover devlog entries from the `devlog/` dir so the published document
-/// records stay in sync with the site builder (which also discovers them) — a
-/// hard-coded list silently drifts every time a new entry lands.
+/// authenticate with an app password; returns the account DID.
+fn login(client: *zat.XrpcClient, allocator: Allocator, identifier: []const u8, password: []const u8) ![]const u8 {
+    const body = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(.{
+        .identifier = identifier,
+        .password = password,
+    }, .{})});
+
+    const nsid = zat.Nsid.parse("com.atproto.server.createSession").?;
+    var result = try client.procedureChecked(nsid, body, .{});
+    defer result.deinit();
+
+    switch (result) {
+        .err => |e| return reportXrpcError("createSession", e),
+        .ok => |resp| {
+            var parsed = try resp.json();
+            defer parsed.deinit();
+            const did = zat.json.getString(parsed.value, "did") orelse return error.MissingDid;
+            const token = zat.json.getString(parsed.value, "accessJwt") orelse return error.MissingToken;
+            client.setAuth(try allocator.dupe(u8, token));
+            return allocator.dupe(u8, did);
+        },
+    }
+}
+
+/// read a document's source, extract its title, and append a create op.
+fn appendDocument(
+    allocator: Allocator,
+    io: std.Io,
+    creates: *std.ArrayList([]const u8),
+    entry: DocEntry,
+    site_uri: []const u8,
+    published_at: []const u8,
+) !void {
+    const content = std.Io.Dir.cwd().readFileAlloc(io, entry.file, allocator, .limited(1024 * 1024)) catch |err| {
+        std.debug.print("warning: could not read {s}: {}\n", .{ entry.file, err });
+        return;
+    };
+    try creates.append(allocator, try createOp(allocator, document_collection, entry.rkey, Document{
+        .site = site_uri,
+        .title = extractTitle(content) orelse entry.file,
+        .path = entry.path,
+        .textContent = content,
+        .publishedAt = published_at,
+    }));
+}
+
+/// discover devlog entries from the `devlog/` dir so the published records stay
+/// in sync with the site builder — a hard-coded list silently drifts.
 fn discoverDevlog(allocator: Allocator, io: std.Io) ![]DocEntry {
     var dir = try std.Io.Dir.cwd().openDir(io, "devlog", .{ .iterate = true });
     defer dir.close(io);
@@ -58,172 +195,99 @@ fn discoverDevlog(allocator: Allocator, io: std.Io) ![]DocEntry {
     var entries: std.ArrayList(DocEntry) = .empty;
     for (names.items) |name| {
         const dash = std.mem.indexOfScalar(u8, name, '-') orelse continue;
-        entries.append(allocator, .{
-            .path = try std.fmt.allocPrint(allocator, "/devlog/{s}", .{name[0..dash]}),
+        const num = name[0..dash];
+        try entries.append(allocator, .{
+            .rkey = try std.fmt.allocPrint(allocator, "devlog-{s}", .{num}),
+            .path = try std.fmt.allocPrint(allocator, "/devlog/{s}", .{num}),
             .file = try std.fmt.allocPrint(allocator, "devlog/{s}", .{name}),
-        }) catch unreachable;
+        });
     }
     return entries.toOwnedSlice(allocator);
 }
 
-pub fn main() !void {
-    // use page_allocator for CLI tool - OS reclaims on exit
-    const allocator = std.heap.page_allocator;
+/// collect delete ops for every record currently in `collection`.
+fn appendDeletesFor(
+    client: *zat.XrpcClient,
+    allocator: Allocator,
+    repo: []const u8,
+    collection: []const u8,
+    deletes: *std.ArrayList([]const u8),
+) !void {
+    var params = std.StringHashMap([]const u8).init(allocator);
+    defer params.deinit();
+    try params.put("repo", repo);
+    try params.put("collection", collection);
+    try params.put("limit", "100");
 
-    const handle = "zat.dev";
+    const nsid = zat.Nsid.parse("com.atproto.repo.listRecords").?;
+    var result = try client.queryChecked(nsid, params, .{});
+    defer result.deinit();
 
-    const password = if (std.c.getenv("ATPROTO_PASSWORD")) |p| std.mem.span(p) else {
-        std.debug.print("error: ATPROTO_PASSWORD not set\n", .{});
-        return error.MissingEnv;
-    };
-
-    // resolve the account's current PDS from its DID document so a future PDS
-    // migration can't silently point this at a stale host (the old default,
-    // bsky.social, is where the account is now deactivated). ATPROTO_PDS still
-    // overrides for local/testing.
-    const pds = if (std.c.getenv("ATPROTO_PDS")) |p|
-        try allocator.dupe(u8, std.mem.span(p))
-    else
-        try resolvePds(allocator, std.Options.debug_io, handle);
-    defer allocator.free(pds);
-    std.debug.print("publishing to pds {s}\n", .{pds});
-
-    var client = zat.XrpcClient.init(std.Options.debug_io, allocator, pds);
-    defer client.deinit();
-
-    const session = try createSession(&client, allocator, handle, password);
-    defer {
-        allocator.free(session.did);
-        allocator.free(session.access_token);
+    switch (result) {
+        .err => |e| return reportXrpcError("listRecords", e),
+        .ok => |resp| {
+            var parsed = try resp.json();
+            defer parsed.deinit();
+            const records = zat.json.getArray(parsed.value, "records") orelse return;
+            for (records) |record| {
+                const uri = zat.json.getString(record, "uri") orelse continue;
+                const at_uri = zat.AtUri.parse(uri) orelse continue;
+                const rkey = at_uri.rkey() orelse continue;
+                try deletes.append(allocator, try deleteOp(allocator, collection, try allocator.dupe(u8, rkey)));
+            }
+        },
     }
-
-    std.debug.print("authenticated as {s}\n", .{session.did});
-    client.setAuth(session.access_token);
-
-    // generate TID for publication (fixed timestamp for deterministic rkey)
-    // using 2024-01-01 00:00:00 UTC as base timestamp (1704067200 seconds = 1704067200000000 microseconds)
-    const pub_tid = zat.Tid.fromTimestamp(1704067200000000, 0);
-    const pub_record = Publication{
-        .url = "https://zat.dev",
-        .name = "zat",
-        .description = "AT Protocol building blocks for zig",
-    };
-
-    try putRecord(&client, allocator, session.did, "site.standard.publication", pub_tid.str(), pub_record);
-    std.debug.print("created publication: at://{s}/site.standard.publication/{s}\n", .{ session.did, pub_tid.str() });
-
-    var pub_uri_buf: std.ArrayList(u8) = .empty;
-    defer pub_uri_buf.deinit(allocator);
-    try pub_uri_buf.print(allocator, "at://{s}/site.standard.publication/{s}", .{ session.did, pub_tid.str() });
-    const pub_uri = pub_uri_buf.items;
-
-    // publish each doc with deterministic TIDs (same base timestamp, incrementing clock_id)
-    const now = timestamp();
-
-    try publishEntries(&client, allocator, session.did, &docs, pub_uri, 1, &now);
-
-    // devlog publication (clock_id 100 to separate from docs)
-    const devlog_tid = zat.Tid.fromTimestamp(1704067200000000, 100);
-    const devlog_pub = Publication{
-        .url = "https://zat.dev/#devlog/index",
-        .name = "zat devlog",
-        .description = "building zat in public",
-    };
-
-    try putRecord(&client, allocator, session.did, "site.standard.publication", devlog_tid.str(), devlog_pub);
-    std.debug.print("created publication: at://{s}/site.standard.publication/{s}\n", .{ session.did, devlog_tid.str() });
-
-    var devlog_uri_buf: std.ArrayList(u8) = .empty;
-    defer devlog_uri_buf.deinit(allocator);
-    try devlog_uri_buf.print(allocator, "at://{s}/site.standard.publication/{s}", .{ session.did, devlog_tid.str() });
-    const devlog_uri = devlog_uri_buf.items;
-
-    const devlog = try discoverDevlog(allocator, std.Options.debug_io);
-    try publishEntries(&client, allocator, session.did, devlog, devlog_uri, 101, &now);
-
-    std.debug.print("done\n", .{});
 }
 
-const Publication = struct {
-    @"$type": []const u8 = "site.standard.publication",
-    url: []const u8,
-    name: []const u8,
-    description: ?[]const u8 = null,
-};
-
-const Document = struct {
-    @"$type": []const u8 = "site.standard.document",
-    site: []const u8,
-    title: []const u8,
-    path: ?[]const u8 = null,
-    textContent: ?[]const u8 = null,
-    publishedAt: []const u8,
-};
-
-const Session = struct {
-    did: []const u8,
-    access_token: []const u8,
-};
-
-fn createSession(client: *zat.XrpcClient, allocator: Allocator, handle: []const u8, password: []const u8) !Session {
-    const CreateSessionInput = struct {
-        identifier: []const u8,
-        password: []const u8,
-    };
-
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    try buf.print(allocator, "{f}", .{std.json.fmt(CreateSessionInput{
-        .identifier = handle,
-        .password = password,
-    }, .{})});
-
-    const nsid = zat.Nsid.parse("com.atproto.server.createSession").?;
-    var response = try client.procedure(nsid, buf.items);
-    defer response.deinit();
-
-    if (!response.ok()) {
-        std.debug.print("createSession failed: {s}\n", .{response.body});
-        return error.AuthFailed;
-    }
-
-    var parsed = try response.json();
-    defer parsed.deinit();
-
-    const did = zat.json.getString(parsed.value, "did") orelse return error.MissingDid;
-    const token = zat.json.getString(parsed.value, "accessJwt") orelse return error.MissingToken;
-
-    return .{
-        .did = try allocator.dupe(u8, did),
-        .access_token = try allocator.dupe(u8, token),
-    };
-}
-
-fn putRecord(client: *zat.XrpcClient, allocator: Allocator, repo: []const u8, collection: []const u8, rkey: []const u8, record: anytype) !void {
-    const PutRecordInput = struct {
-        repo: []const u8,
-        collection: []const u8,
-        rkey: []const u8,
-        record: @TypeOf(record),
-    };
-
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    try buf.print(allocator, "{f}", .{std.json.fmt(PutRecordInput{
-        .repo = repo,
+/// serialize one `applyWrites#create` operation.
+fn createOp(allocator: Allocator, collection: []const u8, rkey: []const u8, value: anytype) ![]const u8 {
+    // omit null optionals so records carry absent fields, not explicit nulls,
+    // which ATProto lexicon validation distinguishes.
+    return std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(.{
+        .@"$type" = "com.atproto.repo.applyWrites#create",
         .collection = collection,
         .rkey = rkey,
-        .record = record,
+        .value = value,
+    }, .{ .emit_null_optional_fields = false })});
+}
+
+/// serialize one `applyWrites#delete` operation.
+fn deleteOp(allocator: Allocator, collection: []const u8, rkey: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(.{
+        .@"$type" = "com.atproto.repo.applyWrites#delete",
+        .collection = collection,
+        .rkey = rkey,
     }, .{})});
+}
 
-    const nsid = zat.Nsid.parse("com.atproto.repo.putRecord").?;
-    var response = try client.procedure(nsid, buf.items);
-    defer response.deinit();
-
-    if (!response.ok()) {
-        std.debug.print("putRecord failed: {s}\n", .{response.body});
-        return error.PutFailed;
+/// POST a batch of pre-serialized write ops as one atomic transaction.
+fn applyWrites(client: *zat.XrpcClient, allocator: Allocator, repo: []const u8, ops: []const []const u8) !void {
+    var body: std.ArrayList(u8) = .empty;
+    try body.print(allocator, "{{\"repo\":\"{s}\",\"writes\":[", .{repo});
+    for (ops, 0..) |op, i| {
+        if (i != 0) try body.append(allocator, ',');
+        try body.appendSlice(allocator, op);
     }
+    try body.appendSlice(allocator, "]}");
+
+    const nsid = zat.Nsid.parse("com.atproto.repo.applyWrites").?;
+    var result = try client.procedureChecked(nsid, body.items, .{});
+    defer result.deinit();
+    switch (result) {
+        .ok => {},
+        .err => |e| return reportXrpcError("applyWrites", e),
+    }
+}
+
+/// log a typed XRPC error and surface it as a Zig error.
+fn reportXrpcError(op: []const u8, e: zat.XrpcClient.XrpcError) error{XrpcCallFailed} {
+    std.debug.print("{s} failed: {d} {s}: {s}\n", .{
+        op,
+        @intFromEnum(e.status),
+        e.error_name orelse "(no error code)",
+        e.message orelse e.body,
+    });
+    return error.XrpcCallFailed;
 }
 
 fn extractTitle(content: []const u8) ?[]const u8 {
@@ -234,9 +298,7 @@ fn extractTitle(content: []const u8) ?[]const u8 {
             var title = trimmed[2..];
             // strip markdown link: [text](url) -> text
             if (std.mem.indexOf(u8, title, "](")) |bracket| {
-                if (title[0] == '[') {
-                    title = title[1..bracket];
-                }
+                if (title[0] == '[') title = title[1..bracket];
             }
             return title;
         }
@@ -244,54 +306,20 @@ fn extractTitle(content: []const u8) ?[]const u8 {
     return null;
 }
 
-fn publishEntries(
-    client: *zat.XrpcClient,
-    allocator: Allocator,
-    did: []const u8,
-    entries: []const DocEntry,
-    site_uri: []const u8,
-    clock_id_base: usize,
-    now: *const [20]u8,
-) !void {
-    for (entries, 0..) |entry, i| {
-        const content = std.Io.Dir.readFileAlloc(.cwd(), std.Options.debug_io, entry.file, allocator, .limited(1024 * 1024)) catch |err| {
-            std.debug.print("warning: could not read {s}: {}\n", .{ entry.file, err });
-            continue;
-        };
-        defer allocator.free(content);
-
-        const title = extractTitle(content) orelse entry.file;
-        const tid = zat.Tid.fromTimestamp(1704067200000000, @intCast(clock_id_base + i));
-
-        const record = Document{
-            .site = site_uri,
-            .title = title,
-            .path = entry.path,
-            .textContent = content,
-            .publishedAt = now,
-        };
-
-        try putRecord(client, allocator, did, "site.standard.document", tid.str(), record);
-        std.debug.print("published: {s} -> at://{s}/site.standard.document/{s}\n", .{ entry.file, did, tid.str() });
-    }
-}
-
-fn timestamp() [20]u8 {
-    const ns = std.Io.Timestamp.now(std.Options.debug_io, .real).nanoseconds;
+/// current time as an RFC-3339 / ISO-8601 UTC timestamp for `publishedAt`.
+fn nowIso8601(allocator: Allocator, io: std.Io) ![]const u8 {
+    const ns = std.Io.Timestamp.now(io, .real).nanoseconds;
     const secs: u64 = @intCast(@divFloor(ns, std.time.ns_per_s));
     const es = std.time.epoch.EpochSeconds{ .secs = secs };
     const yd = es.getEpochDay().calculateYearDay();
     const md = yd.calculateMonthDay();
     const ds = es.getDaySeconds();
-
-    var buf: [20]u8 = undefined;
-    _ = std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+    return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
         yd.year,
         @as(u32, md.month.numeric()),
         @as(u32, md.day_index) + 1,
         @as(u32, ds.getHoursIntoDay()),
         @as(u32, ds.getMinutesIntoHour()),
         @as(u32, ds.getSecondsIntoMinute()),
-    }) catch unreachable;
-    return buf;
+    });
 }
