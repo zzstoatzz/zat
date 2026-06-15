@@ -1,9 +1,9 @@
 //! publish zat's docs to its ATProto repo as `site.standard` records.
 //!
 //! a small but complete showcase of the library: resolve the account's PDS
-//! from its DID document, authenticate, and replace the published record set in
-//! one atomic `applyWrites` transaction — using zat's checked XRPC API so
-//! protocol errors arrive as typed `XrpcError`s rather than opaque bodies.
+//! from its DID document, authenticate, upsert the current document set with
+//! stable record keys, and prune anything left over — all through zat's checked
+//! XRPC API, so protocol errors arrive as typed `XrpcError`s, not opaque bodies.
 
 const std = @import("std");
 const zat = @import("zat");
@@ -73,36 +73,35 @@ pub fn main() !void {
 
     const published_at = try nowIso8601(allocator, io);
 
-    // assemble the full desired record set as applyWrites create operations.
-    var creates: std.ArrayList([]const u8) = .empty;
-
-    try creates.append(allocator, try createOp(allocator, publication_collection, "site", Publication{
+    // upsert publications, then every document, tracking the keys we write so
+    // we can prune anything stale afterward. putRecord is an upsert, so re-runs
+    // are idempotent and writing-before-pruning never leaves the repo empty.
+    try putRecord(&client, allocator, did, publication_collection, "site", Publication{
         .url = "https://zat.dev",
         .name = "zat",
         .description = "AT Protocol building blocks for zig",
-    }));
-    try creates.append(allocator, try createOp(allocator, publication_collection, "devlog", Publication{
+    });
+    try putRecord(&client, allocator, did, publication_collection, "devlog", Publication{
         .url = "https://zat.dev/#devlog/index",
         .name = "zat devlog",
         .description = "building zat in public",
-    }));
+    });
 
-    for (&docs) |entry| try appendDocument(allocator, io, &creates, entry, site_uri, published_at);
-    for (try discoverDevlog(allocator, io)) |entry| try appendDocument(allocator, io, &creates, entry, devlog_uri, published_at);
-
-    // swap the published set atomically: delete whatever's there now (including
-    // any records under the old key scheme), then write the desired set. two
-    // transactions keep each one free of same-key delete+create conflicts.
-    var deletes: std.ArrayList([]const u8) = .empty;
-    try appendDeletesFor(&client, allocator, did, publication_collection, &deletes);
-    try appendDeletesFor(&client, allocator, did, document_collection, &deletes);
-    if (deletes.items.len > 0) {
-        try applyWrites(&client, allocator, did, deletes.items);
-        std.debug.print("cleaned up {d} existing record(s)\n", .{deletes.items.len});
+    var doc_keys: std.ArrayList([]const u8) = .empty;
+    for (&docs) |entry| {
+        if (try publishDocument(&client, allocator, io, did, entry, site_uri, published_at))
+            try doc_keys.append(allocator, entry.rkey);
     }
+    for (try discoverDevlog(allocator, io)) |entry| {
+        if (try publishDocument(&client, allocator, io, did, entry, devlog_uri, published_at))
+            try doc_keys.append(allocator, entry.rkey);
+    }
+    std.debug.print("published {d} document(s)\n", .{doc_keys.items.len});
 
-    try applyWrites(&client, allocator, did, creates.items);
-    std.debug.print("published {d} record(s)\n", .{creates.items.len});
+    // remove records we no longer publish — including any under an older key
+    // scheme — so the repo matches exactly what we just wrote.
+    try pruneStale(&client, allocator, did, publication_collection, &.{ "site", "devlog" });
+    try pruneStale(&client, allocator, did, document_collection, doc_keys.items);
 }
 
 /// resolve the PDS service endpoint for a handle via its DID document.
@@ -124,7 +123,7 @@ fn resolvePds(allocator: Allocator, io: std.Io, handle_str: []const u8) ![]const
     return allocator.dupe(u8, pds);
 }
 
-/// authenticate with an app password; returns the account DID.
+/// authenticate with an app password; returns the account DID and sets auth.
 fn login(client: *zat.XrpcClient, allocator: Allocator, identifier: []const u8, password: []const u8) ![]const u8 {
     const body = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(.{
         .identifier = identifier,
@@ -148,26 +147,29 @@ fn login(client: *zat.XrpcClient, allocator: Allocator, identifier: []const u8, 
     }
 }
 
-/// read a document's source, extract its title, and append a create op.
-fn appendDocument(
+/// read a document's source, extract its title, and upsert it. returns false
+/// (and warns) if the source can't be read, so a missing file isn't fatal.
+fn publishDocument(
+    client: *zat.XrpcClient,
     allocator: Allocator,
     io: std.Io,
-    creates: *std.ArrayList([]const u8),
+    did: []const u8,
     entry: DocEntry,
     site_uri: []const u8,
     published_at: []const u8,
-) !void {
+) !bool {
     const content = std.Io.Dir.cwd().readFileAlloc(io, entry.file, allocator, .limited(1024 * 1024)) catch |err| {
         std.debug.print("warning: could not read {s}: {}\n", .{ entry.file, err });
-        return;
+        return false;
     };
-    try creates.append(allocator, try createOp(allocator, document_collection, entry.rkey, Document{
+    try putRecord(client, allocator, did, document_collection, entry.rkey, Document{
         .site = site_uri,
         .title = extractTitle(content) orelse entry.file,
         .path = entry.path,
         .textContent = content,
         .publishedAt = published_at,
-    }));
+    });
+    return true;
 }
 
 /// discover devlog entries from the `devlog/` dir so the published records stay
@@ -205,78 +207,72 @@ fn discoverDevlog(allocator: Allocator, io: std.Io) ![]DocEntry {
     return entries.toOwnedSlice(allocator);
 }
 
-/// collect delete ops for every record currently in `collection`.
-fn appendDeletesFor(
-    client: *zat.XrpcClient,
-    allocator: Allocator,
-    repo: []const u8,
-    collection: []const u8,
-    deletes: *std.ArrayList([]const u8),
-) !void {
+/// create-or-replace a record. omits null optionals so records carry absent
+/// fields, not explicit nulls, which ATProto lexicon validation distinguishes.
+fn putRecord(client: *zat.XrpcClient, allocator: Allocator, repo: []const u8, collection: []const u8, rkey: []const u8, value: anytype) !void {
+    const record = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(value, .{ .emit_null_optional_fields = false })});
+    const body = try std.fmt.allocPrint(
+        allocator,
+        "{{\"repo\":\"{s}\",\"collection\":\"{s}\",\"rkey\":\"{s}\",\"record\":{s}}}",
+        .{ repo, collection, rkey, record },
+    );
+
+    const nsid = zat.Nsid.parse("com.atproto.repo.putRecord").?;
+    var result = try client.procedureChecked(nsid, body, .{});
+    defer result.deinit();
+    switch (result) {
+        .ok => {},
+        .err => |e| return reportXrpcError("putRecord", e),
+    }
+}
+
+/// delete every record in `collection` whose rkey is not in `keep`.
+fn pruneStale(client: *zat.XrpcClient, allocator: Allocator, repo: []const u8, collection: []const u8, keep: []const []const u8) !void {
     var params = std.StringHashMap([]const u8).init(allocator);
     defer params.deinit();
     try params.put("repo", repo);
     try params.put("collection", collection);
     try params.put("limit", "100");
 
-    const nsid = zat.Nsid.parse("com.atproto.repo.listRecords").?;
-    var result = try client.queryChecked(nsid, params, .{});
+    const list_nsid = zat.Nsid.parse("com.atproto.repo.listRecords").?;
+    var result = try client.queryChecked(list_nsid, params, .{});
     defer result.deinit();
 
-    switch (result) {
+    const resp = switch (result) {
         .err => |e| return reportXrpcError("listRecords", e),
-        .ok => |resp| {
-            var parsed = try resp.json();
-            defer parsed.deinit();
-            const records = zat.json.getArray(parsed.value, "records") orelse return;
-            for (records) |record| {
-                const uri = zat.json.getString(record, "uri") orelse continue;
-                const at_uri = zat.AtUri.parse(uri) orelse continue;
-                const rkey = at_uri.rkey() orelse continue;
-                try deletes.append(allocator, try deleteOp(allocator, collection, try allocator.dupe(u8, rkey)));
-            }
-        },
+        .ok => |r| r,
+    };
+    var parsed = try resp.json();
+    defer parsed.deinit();
+
+    const records = zat.json.getArray(parsed.value, "records") orelse return;
+    for (records) |record| {
+        const uri = zat.json.getString(record, "uri") orelse continue;
+        const rkey = (zat.AtUri.parse(uri) orelse continue).rkey() orelse continue;
+        if (contains(keep, rkey)) continue;
+        try deleteRecord(client, allocator, repo, collection, rkey);
+        std.debug.print("pruned stale {s}/{s}\n", .{ collection, rkey });
     }
 }
 
-/// serialize one `applyWrites#create` operation.
-fn createOp(allocator: Allocator, collection: []const u8, rkey: []const u8, value: anytype) ![]const u8 {
-    // omit null optionals so records carry absent fields, not explicit nulls,
-    // which ATProto lexicon validation distinguishes.
-    return std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(.{
-        .@"$type" = "com.atproto.repo.applyWrites#create",
-        .collection = collection,
-        .rkey = rkey,
-        .value = value,
-    }, .{ .emit_null_optional_fields = false })});
-}
-
-/// serialize one `applyWrites#delete` operation.
-fn deleteOp(allocator: Allocator, collection: []const u8, rkey: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(.{
-        .@"$type" = "com.atproto.repo.applyWrites#delete",
-        .collection = collection,
-        .rkey = rkey,
-    }, .{})});
-}
-
-/// POST a batch of pre-serialized write ops as one atomic transaction.
-fn applyWrites(client: *zat.XrpcClient, allocator: Allocator, repo: []const u8, ops: []const []const u8) !void {
-    var body: std.ArrayList(u8) = .empty;
-    try body.print(allocator, "{{\"repo\":\"{s}\",\"writes\":[", .{repo});
-    for (ops, 0..) |op, i| {
-        if (i != 0) try body.append(allocator, ',');
-        try body.appendSlice(allocator, op);
-    }
-    try body.appendSlice(allocator, "]}");
-
-    const nsid = zat.Nsid.parse("com.atproto.repo.applyWrites").?;
-    var result = try client.procedureChecked(nsid, body.items, .{});
+fn deleteRecord(client: *zat.XrpcClient, allocator: Allocator, repo: []const u8, collection: []const u8, rkey: []const u8) !void {
+    const body = try std.fmt.allocPrint(
+        allocator,
+        "{{\"repo\":\"{s}\",\"collection\":\"{s}\",\"rkey\":\"{s}\"}}",
+        .{ repo, collection, rkey },
+    );
+    const nsid = zat.Nsid.parse("com.atproto.repo.deleteRecord").?;
+    var result = try client.procedureChecked(nsid, body, .{});
     defer result.deinit();
     switch (result) {
         .ok => {},
-        .err => |e| return reportXrpcError("applyWrites", e),
+        .err => |e| return reportXrpcError("deleteRecord", e),
     }
+}
+
+fn contains(haystack: []const []const u8, needle: []const u8) bool {
+    for (haystack) |s| if (std.mem.eql(u8, s, needle)) return true;
+    return false;
 }
 
 /// log a typed XRPC error and surface it as a Zig error.
