@@ -12,6 +12,26 @@ const docs = [_]DocEntry{
     .{ .path = "/changelog", .file = "CHANGELOG.md" },
 };
 
+/// resolve the PDS service endpoint for a handle via its DID document.
+fn resolvePds(allocator: Allocator, io: std.Io, handle_str: []const u8) ![]const u8 {
+    const handle = zat.Handle.parse(handle_str) orelse return error.InvalidHandle;
+
+    var handle_resolver = zat.HandleResolver.init(io, allocator);
+    defer handle_resolver.deinit();
+    const did_str = try handle_resolver.resolve(handle);
+    defer allocator.free(did_str);
+
+    const did = zat.Did.parse(did_str) orelse return error.InvalidDid;
+
+    var did_resolver = zat.DidResolver.init(io, allocator);
+    defer did_resolver.deinit();
+    var doc = try did_resolver.resolve(did);
+    defer doc.deinit();
+
+    const pds = doc.pdsEndpoint() orelse return error.NoPdsEndpoint;
+    return try allocator.dupe(u8, pds);
+}
+
 /// discover devlog entries from the `devlog/` dir so the published document
 /// records stay in sync with the site builder (which also discovers them) — a
 /// hard-coded list silently drifts every time a new entry lands.
@@ -57,7 +77,16 @@ pub fn main() !void {
         return error.MissingEnv;
     };
 
-    const pds = if (std.c.getenv("ATPROTO_PDS")) |p| std.mem.span(p) else "https://bsky.social";
+    // resolve the account's current PDS from its DID document so a future PDS
+    // migration can't silently point this at a stale host (the old default,
+    // bsky.social, is where the account is now deactivated). ATPROTO_PDS still
+    // overrides for local/testing.
+    const pds = if (std.c.getenv("ATPROTO_PDS")) |p|
+        try allocator.dupe(u8, std.mem.span(p))
+    else
+        try resolvePds(allocator, std.Options.debug_io, handle);
+    defer allocator.free(pds);
+    std.debug.print("publishing to pds {s}\n", .{pds});
 
     var client = zat.XrpcClient.init(std.Options.debug_io, allocator, pds);
     defer client.deinit();
