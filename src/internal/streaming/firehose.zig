@@ -15,6 +15,8 @@ const cbor = @import("../repo/cbor.zig");
 const car = @import("../repo/car.zig");
 const mst = @import("../repo/mst.zig");
 const sync = @import("sync.zig");
+const Nsid = @import("../syntax/nsid.zig").Nsid;
+const Rkey = @import("../syntax/rkey.zig").Rkey;
 
 const mem = std.mem;
 const Allocator = mem.Allocator;
@@ -142,6 +144,7 @@ pub const DecodeError = error{
     InvalidHeader,
     UnexpectedEof,
     MissingField,
+    InvalidRepoPath,
     UnknownOp,
     UnknownEventType,
 } || cbor.DecodeError || car.CarError;
@@ -188,7 +191,7 @@ fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
 
     const commit_cid = payload.getCid("commit") orelse return error.MissingField;
     const blocks_bytes = payload.getBytes("blocks") orelse return error.MissingField;
-    const prev_data = payload.getCid("prevData") orelse return error.MissingField;
+    const prev_data = try optionalCid(payload, "prevData");
 
     // parse blobs array (array of CID links)
     var blobs: std.ArrayList(cbor.Cid) = .empty;
@@ -215,10 +218,7 @@ fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
             const action = CommitAction.parse(action_str) orelse continue;
             const path = op_val.getString("path") orelse continue;
 
-            // split path into collection/rkey
-            const slash = mem.indexOfScalar(u8, path, '/') orelse continue;
-            const collection = path[0..slash];
-            const rkey = path[slash + 1 ..];
+            const repo_path = try parseRepoPath(path);
 
             // extract CID from op and look up record from CAR blocks
             var op_cid: ?cbor.Cid = null;
@@ -247,8 +247,8 @@ fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
             try ops.append(allocator, .{
                 .action = action,
                 .path = path,
-                .collection = collection,
-                .rkey = rkey,
+                .collection = repo_path.collection,
+                .rkey = repo_path.rkey,
                 .cid = op_cid,
                 .prev = op_prev,
                 .record = record,
@@ -269,6 +269,32 @@ fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
         .blobs = try blobs.toOwnedSlice(allocator),
         .too_big = payload.getBool("tooBig") orelse false,
     } };
+}
+
+const RepoPath = struct {
+    collection: []const u8,
+    rkey: []const u8,
+};
+
+fn parseRepoPath(path: []const u8) DecodeError!RepoPath {
+    const slash = mem.indexOfScalar(u8, path, '/') orelse return error.InvalidRepoPath;
+    if (mem.indexOfScalarPos(u8, path, slash + 1, '/') != null) return error.InvalidRepoPath;
+
+    const collection = path[0..slash];
+    const rkey = path[slash + 1 ..];
+    if (Nsid.parse(collection) == null) return error.InvalidRepoPath;
+    if (Rkey.parse(rkey) == null) return error.InvalidRepoPath;
+
+    return .{ .collection = collection, .rkey = rkey };
+}
+
+fn optionalCid(value: cbor.Value, key: []const u8) DecodeError!?cbor.Cid {
+    const found = value.get(key) orelse return error.MissingField;
+    return switch (found) {
+        .cid => |cid| cid,
+        .null => null,
+        else => error.MissingField,
+    };
 }
 
 fn decodeSync(payload: cbor.Value) DecodeError!Event {
@@ -350,6 +376,7 @@ fn encodeCommitPayload(allocator: Allocator, writer: anytype, commit: CommitEven
             op.path
         else
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ op.collection, op.rkey });
+        _ = try parseRepoPath(path);
 
         if (op.record) |record| {
             // encode record, create CID, add to CAR blocks
@@ -412,9 +439,7 @@ fn encodeCommitPayload(allocator: Allocator, writer: anytype, commit: CommitEven
     }
     try entries.append(allocator, .{ .key = "blobs", .value = .{ .array = blob_values.items } });
     try entries.append(allocator, .{ .key = "ops", .value = .{ .array = op_values.items } });
-    if (commit.prev_data) |prev_data| {
-        try entries.append(allocator, .{ .key = "prevData", .value = .{ .cid = prev_data } });
-    }
+    try entries.append(allocator, .{ .key = "prevData", .value = if (commit.prev_data) |prev_data| .{ .cid = prev_data } else .null });
     try entries.append(allocator, .{ .key = "repo", .value = .{ .text = commit.repo } });
     try entries.append(allocator, .{ .key = "rev", .value = .{ .text = commit.rev } });
     try entries.append(allocator, .{ .key = "seq", .value = .{ .unsigned = @intCast(commit.seq) } });
@@ -847,6 +872,60 @@ test "encode → decode commit with delete (no record)" {
     try std.testing.expect(decoded.commit.ops[0].cid == null);
     try std.testing.expectEqualSlices(u8, prev_record.raw, decoded.commit.ops[0].prev.?.raw);
     try std.testing.expect(decoded.commit.ops[0].record == null);
+}
+
+test "encode → decode commit with null prevData" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const commit_cid = try cbor.Cid.forDagCbor(alloc, "commit");
+
+    const original = Event{ .commit = .{
+        .seq = 501,
+        .repo = "did:plc:initial",
+        .rev = "3k2xyz000001",
+        .time = "2024-01-15T10:30:00Z",
+        .since = null,
+        .commit = commit_cid,
+        .blocks = "car bytes",
+        .prev_data = null,
+        .ops = &.{},
+    } };
+
+    const frame = try encodeFrame(alloc, original);
+    const decoded = try decodeFrame(alloc, frame);
+
+    try std.testing.expectEqual(@as(i64, 501), decoded.commit.seq);
+    try std.testing.expectEqualStrings("did:plc:initial", decoded.commit.repo);
+    try std.testing.expectEqualStrings("3k2xyz000001", decoded.commit.rev);
+    try std.testing.expect(decoded.commit.since == null);
+    try std.testing.expect(decoded.commit.prev_data == null);
+    try std.testing.expectEqualStrings("car bytes", decoded.commit.blocks);
+}
+
+test "commit op paths are validated" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const commit_cid = try cbor.Cid.forDagCbor(alloc, "commit");
+
+    const event = Event{ .commit = .{
+        .seq = 502,
+        .repo = "did:plc:badpath",
+        .rev = "3k2xyz000002",
+        .time = "2024-01-15T10:30:00Z",
+        .commit = commit_cid,
+        .blocks = "car bytes",
+        .prev_data = null,
+        .ops = &.{.{
+            .action = .create,
+            .path = "app.bsky.feed.post/not/one/rkey",
+            .collection = "app.bsky.feed.post",
+            .rkey = "unused",
+        }},
+    } };
+
+    try std.testing.expectError(error.InvalidRepoPath, encodeFrame(alloc, event));
 }
 
 test "encode → decode sync frame" {
