@@ -15,8 +15,10 @@ const cbor = @import("../repo/cbor.zig");
 const car = @import("../repo/car.zig");
 const mst = @import("../repo/mst.zig");
 const sync = @import("sync.zig");
+const Did = @import("../syntax/did.zig").Did;
 const Nsid = @import("../syntax/nsid.zig").Nsid;
 const Rkey = @import("../syntax/rkey.zig").Rkey;
+const Tid = @import("../syntax/tid.zig").Tid;
 
 const mem = std.mem;
 const Allocator = mem.Allocator;
@@ -149,6 +151,17 @@ pub const DecodeError = error{
     UnknownEventType,
 } || cbor.DecodeError || car.CarError;
 
+pub const ValidateCommitError = error{
+    MissingCommitCid,
+    InvalidRepoDid,
+    InvalidRev,
+    InvalidSince,
+    InvalidRepoPath,
+    MissingRecordCid,
+    UnexpectedRecordCid,
+    UnexpectedPrevRecordCid,
+};
+
 /// decode a raw WebSocket binary frame into a firehose Event
 pub fn decodeFrame(allocator: Allocator, data: []const u8) DecodeError!Event {
     // frame = [CBOR header] [CBOR payload] concatenated
@@ -271,12 +284,42 @@ fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
     } };
 }
 
+/// Validate the structural shape of a decoded commit event.
+///
+/// This is intentionally lighter than repo verification: it checks event
+/// vocabulary, identifier syntax, repo op paths, and op CID nullability. It
+/// does not parse CAR blocks, verify commit signatures, or prove MST roots.
+pub fn validateCommitEvent(commit: CommitEvent) ValidateCommitError!void {
+    if (Did.parse(commit.repo) == null) return error.InvalidRepoDid;
+    if (Tid.parse(commit.rev) == null) return error.InvalidRev;
+    if (commit.since) |since| {
+        if (Tid.parse(since) == null) return error.InvalidSince;
+    }
+    if (commit.commit == null) return error.MissingCommitCid;
+
+    for (commit.ops) |op| {
+        try validateRepoOpPath(op);
+        switch (op.action) {
+            .create => {
+                if (op.cid == null) return error.MissingRecordCid;
+                if (op.prev != null) return error.UnexpectedPrevRecordCid;
+            },
+            .update => {
+                if (op.cid == null) return error.MissingRecordCid;
+            },
+            .delete => {
+                if (op.cid != null) return error.UnexpectedRecordCid;
+            },
+        }
+    }
+}
+
 const RepoPath = struct {
     collection: []const u8,
     rkey: []const u8,
 };
 
-fn parseRepoPath(path: []const u8) DecodeError!RepoPath {
+fn parseRepoPath(path: []const u8) error{InvalidRepoPath}!RepoPath {
     const slash = mem.indexOfScalar(u8, path, '/') orelse return error.InvalidRepoPath;
     if (mem.indexOfScalarPos(u8, path, slash + 1, '/') != null) return error.InvalidRepoPath;
 
@@ -286,6 +329,15 @@ fn parseRepoPath(path: []const u8) DecodeError!RepoPath {
     if (Rkey.parse(rkey) == null) return error.InvalidRepoPath;
 
     return .{ .collection = collection, .rkey = rkey };
+}
+
+fn validateRepoOpPath(op: RepoOp) error{InvalidRepoPath}!void {
+    if (op.path.len != 0) {
+        _ = try parseRepoPath(op.path);
+        return;
+    }
+    if (Nsid.parse(op.collection) == null) return error.InvalidRepoPath;
+    if (Rkey.parse(op.rkey) == null) return error.InvalidRepoPath;
 }
 
 fn optionalCid(value: cbor.Value, key: []const u8) DecodeError!?cbor.Cid {
@@ -926,6 +978,121 @@ test "commit op paths are validated" {
     } };
 
     try std.testing.expectError(error.InvalidRepoPath, encodeFrame(alloc, event));
+}
+
+test "validate commit event accepts structurally valid event" {
+    const alloc = std.testing.allocator;
+    const commit_cid = try cbor.Cid.forDagCbor(alloc, "commit");
+    defer alloc.free(commit_cid.raw);
+    const record_cid = try cbor.Cid.forDagCbor(alloc, "record");
+    defer alloc.free(record_cid.raw);
+    const prev_record_cid = try cbor.Cid.forDagCbor(alloc, "prev-record");
+    defer alloc.free(prev_record_cid.raw);
+    const rev = Tid.fromTimestamp(1704067200000000, 1);
+    const since = Tid.fromTimestamp(1704067100000000, 1);
+
+    try validateCommitEvent(.{
+        .seq = 600,
+        .repo = "did:plc:validator",
+        .rev = rev.str(),
+        .time = "2024-01-15T10:30:00Z",
+        .since = since.str(),
+        .commit = commit_cid,
+        .blocks = "car bytes",
+        .ops = &.{
+            .{
+                .action = .create,
+                .path = "app.bsky.feed.post/3k2valid",
+                .collection = "unused.invalid.value",
+                .rkey = "unused",
+                .cid = record_cid,
+            },
+            .{
+                .action = .update,
+                .collection = "app.bsky.feed.post",
+                .rkey = "3k2valid",
+                .cid = record_cid,
+                .prev = prev_record_cid,
+            },
+            .{
+                .action = .delete,
+                .collection = "app.bsky.feed.post",
+                .rkey = "3k2delete",
+                .prev = prev_record_cid,
+            },
+        },
+    });
+}
+
+test "validate commit event rejects commit CID in since" {
+    const alloc = std.testing.allocator;
+    const commit_cid = try cbor.Cid.forDagCbor(alloc, "commit");
+    defer alloc.free(commit_cid.raw);
+    const rev = Tid.fromTimestamp(1704067200000000, 1);
+
+    try std.testing.expectError(error.InvalidSince, validateCommitEvent(.{
+        .seq = 601,
+        .repo = "did:plc:validator",
+        .rev = rev.str(),
+        .time = "2024-01-15T10:30:00Z",
+        .since = "bafyreihyrpefhacm2x43w6c5ylz6dibjtnfubn2noldubqefbzzrskc6sy",
+        .commit = commit_cid,
+        .blocks = "car bytes",
+        .ops = &.{},
+    }));
+}
+
+test "validate commit event enforces op CID nullability" {
+    const alloc = std.testing.allocator;
+    const commit_cid = try cbor.Cid.forDagCbor(alloc, "commit");
+    defer alloc.free(commit_cid.raw);
+    const record_cid = try cbor.Cid.forDagCbor(alloc, "record");
+    defer alloc.free(record_cid.raw);
+    const prev_record_cid = try cbor.Cid.forDagCbor(alloc, "prev-record");
+    defer alloc.free(prev_record_cid.raw);
+    const rev = Tid.fromTimestamp(1704067200000000, 1);
+
+    try std.testing.expectError(error.MissingRecordCid, validateCommitEvent(.{
+        .seq = 602,
+        .repo = "did:plc:validator",
+        .rev = rev.str(),
+        .time = "2024-01-15T10:30:00Z",
+        .commit = commit_cid,
+        .ops = &.{.{
+            .action = .create,
+            .collection = "app.bsky.feed.post",
+            .rkey = "3k2missing",
+        }},
+    }));
+
+    try std.testing.expectError(error.UnexpectedRecordCid, validateCommitEvent(.{
+        .seq = 603,
+        .repo = "did:plc:validator",
+        .rev = rev.str(),
+        .time = "2024-01-15T10:30:00Z",
+        .commit = commit_cid,
+        .ops = &.{.{
+            .action = .delete,
+            .collection = "app.bsky.feed.post",
+            .rkey = "3k2delete",
+            .cid = record_cid,
+        }},
+    }));
+
+    try std.testing.expectError(error.UnexpectedPrevRecordCid, validateCommitEvent(.{
+        .seq = 604,
+        .repo = "did:plc:validator",
+        .rev = rev.str(),
+        .time = "2024-01-15T10:30:00Z",
+        .commit = commit_cid,
+        .ops = &.{.{
+            .action = .create,
+            .collection = "app.bsky.feed.post",
+            .rkey = "3k2create",
+            .cid = record_cid,
+            .prev = prev_record_cid,
+        }},
+    }));
 }
 
 test "encode → decode sync frame" {
