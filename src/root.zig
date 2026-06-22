@@ -39,7 +39,7 @@ pub const cbor = @import("internal/repo/cbor.zig");
 pub const car = @import("internal/repo/car.zig");
 
 // repo verification
-pub const repo_verifier = @import("internal/repo/repo_verifier.zig");
+const repo_verifier = @import("internal/repo/repo_verifier.zig");
 pub const verifyRepo = repo_verifier.verifyRepo;
 pub const VerifyResult = repo_verifier.VerifyResult;
 pub const verifyCommitCar = repo_verifier.verifyCommitCar;

@@ -160,7 +160,7 @@ const FrameHeader = struct {
     t: ?[]const u8 = null,
 };
 
-pub const FrameOp = enum(i64) {
+const FrameOp = enum(i64) {
     message = 1,
     err = -1,
 };
@@ -450,7 +450,7 @@ fn decodeAccount(payload: cbor.Value) DecodeError!Event {
 // === encoder ===
 
 /// encode a firehose Event into a wire frame: [DAG-CBOR header] [DAG-CBOR payload]
-pub fn encodeFrame(allocator: Allocator, event: Event) ![]u8 {
+fn encodeFrame(allocator: Allocator, event: Event) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
 

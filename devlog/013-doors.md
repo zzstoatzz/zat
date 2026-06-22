@@ -6,7 +6,7 @@ devlog 012 ended at `v0.3.5`. this covers `v0.3.6` and `v0.3.7`, and there is no
 
 the new consumer this cycle is [leaflet-search](https://tangled.org/zzstoatzz.io/leaflet-search) (now pub-search), which grew its own firehose ingester to replace indigo's `tap`. the ingester's last blocker was verification: it wanted to consume the firehose and verify each commit in-process before trusting it.
 
-zat already had the verifier for exactly this. `repo_verifier.verifyCommitCar` says so in its own doc comment — "used by the relay to verify firehose commit frames directly" — and takes the raw CAR bytes from a frame's `blocks` field plus a resolved signing key. the function was right there.
+zat already had the verifier for exactly this. `verifyCommitCar` says so in its own doc comment — "used by the relay to verify firehose commit frames directly" — and takes the raw CAR bytes from a frame's `blocks` field plus a resolved signing key. the function was right there.
 
 the problem was that you could not get the bytes to it. every prior verification story in these notes is *low-level*: the relay (devlog 006), zlay, and zds all decode firehose frames themselves, so they were already holding the raw CAR when it came time to verify. a high-level `FirehoseClient` consumer was not. `decodeFrame` read the `blocks`, parsed the CAR to hydrate each op's record, and then **discarded the raw bytes**. `CommitEvent` exposed `seq`, `repo`, `rev`, `ops`, `blobs`, `too_big` — and nothing you could hand to `verifyCommitCar`. the documented path was real and unreachable at the same time.
 
@@ -27,7 +27,7 @@ pub const CommitEvent = struct {
 now the high-level consumer does what the relay always could:
 
 ```zig
-try zat.repo_verifier.verifyCommitCar(allocator, event.commit.blocks, signing_key, .{});
+try zat.verifyCommitCar(allocator, event.commit.blocks, signing_key, .{});
 ```
 
 the same change carries `prev_data` and the per-op `prev` CIDs through, adds a `toMstOperations()` helper, and decodes `#sync` events — so a consumer that wants the stronger [`verifyCommitDiff`](https://tangled.org/zat.dev/zat/blob/main/src/internal/repo/repo_verifier.zig) (invert the ops, prove the previous root) has the inputs for that too. CAR parse failure during hydration is now non-fatal: the wire event still surfaces, and a consumer rejects it by verifying `blocks` explicitly rather than by never seeing it. leaflet-search's ingester verifies in-consumer now, which was the sole thing standing between it and replacing `tap`.

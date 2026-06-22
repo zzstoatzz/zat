@@ -3,8 +3,8 @@
 //! `primitives` contains PKCE, DPoP, client assertions, and form/JWKS helpers.
 //! `client` contains framework-neutral ATProto OAuth client ceremony.
 
-pub const primitives = @import("oauth/primitives.zig");
-pub const client = @import("oauth/client.zig");
+const primitives = @import("oauth/primitives.zig");
+const client = @import("oauth/client.zig");
 
 pub const createJwt = primitives.createJwt;
 pub const createDpopProof = primitives.createDpopProof;
