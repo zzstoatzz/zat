@@ -72,6 +72,7 @@ pub const CommitEvent = struct {
     ops: []const RepoOp,
     prev_data: ?cbor.Cid = null, // MST root CID of the previous revision
     blobs: []const cbor.Cid = &.{}, // new blobs referenced by records in this commit
+    rebase: bool = false,
     too_big: bool = false,
 
     pub fn toMstOperations(self: CommitEvent, allocator: Allocator) Allocator.Error![]mst.Operation {
@@ -100,6 +101,29 @@ pub const RepoOp = struct {
     cid: ?cbor.Cid = null, // CID of the record (null for deletes)
     prev: ?cbor.Cid = null, // CID of the previous record for updates/deletes
     record: ?cbor.Value = null, // decoded DAG-CBOR record from CAR block
+};
+
+pub const CommitEventOp = struct {
+    action: CommitAction,
+    collection: []const u8,
+    rkey: []const u8,
+    cid: ?cbor.Cid = null,
+    prev: ?cbor.Cid = null,
+};
+
+pub const CommitEventParams = struct {
+    seq: i64,
+    repo_did: []const u8,
+    commit_cid: cbor.Cid,
+    rev: []const u8,
+    since_rev: ?[]const u8 = null,
+    prev_data: ?cbor.Cid = null,
+    blocks: []const u8,
+    ops: []const CommitEventOp,
+    blobs: []const cbor.Cid = &.{},
+    time: []const u8,
+    rebase: bool = false,
+    too_big: bool = false,
 };
 
 pub const SyncEvent = struct {
@@ -280,6 +304,7 @@ fn decodeCommit(allocator: Allocator, payload: cbor.Value) DecodeError!Event {
         .ops = try ops.toOwnedSlice(allocator),
         .prev_data = prev_data,
         .blobs = try blobs.toOwnedSlice(allocator),
+        .rebase = payload.getBool("rebase") orelse false,
         .too_big = payload.getBool("tooBig") orelse false,
     } };
 }
@@ -312,6 +337,49 @@ pub fn validateCommitEvent(commit: CommitEvent) ValidateCommitError!void {
             },
         }
     }
+}
+
+fn commitEvent(allocator: Allocator, params: CommitEventParams) (Allocator.Error || ValidateCommitError)!CommitEvent {
+    var ops: std.ArrayList(RepoOp) = .empty;
+    errdefer ops.deinit(allocator);
+
+    for (params.ops) |op| {
+        try ops.append(allocator, .{
+            .action = op.action,
+            .path = "",
+            .collection = op.collection,
+            .rkey = op.rkey,
+            .cid = op.cid,
+            .prev = op.prev,
+        });
+    }
+
+    const event: CommitEvent = .{
+        .seq = params.seq,
+        .repo = params.repo_did,
+        .rev = params.rev,
+        .time = params.time,
+        .since = params.since_rev,
+        .commit = params.commit_cid,
+        .blocks = params.blocks,
+        .ops = try ops.toOwnedSlice(allocator),
+        .prev_data = params.prev_data,
+        .blobs = params.blobs,
+        .rebase = params.rebase,
+        .too_big = params.too_big,
+    };
+    errdefer allocator.free(event.ops);
+
+    try validateCommitEvent(event);
+    return event;
+}
+
+pub fn encodeCommitEvent(allocator: Allocator, params: CommitEventParams) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const event = try commitEvent(arena.allocator(), params);
+    return encodeFrame(allocator, .{ .commit = event });
 }
 
 const RepoPath = struct {
@@ -457,7 +525,7 @@ fn encodeCommitPayload(allocator: Allocator, writer: anytype, commit: CommitEven
             var op_entries: std.ArrayList(cbor.Value.MapEntry) = .empty;
             defer op_entries.deinit(allocator);
             try op_entries.append(allocator, .{ .key = "action", .value = .{ .text = action_str } });
-            try op_entries.append(allocator, .{ .key = "cid", .value = .null });
+            try op_entries.append(allocator, .{ .key = "cid", .value = if (op.cid) |cid| .{ .cid = cid } else .null });
             try op_entries.append(allocator, .{ .key = "path", .value = .{ .text = path } });
             if (op.prev) |prev| {
                 try op_entries.append(allocator, .{ .key = "prev", .value = .{ .cid = prev } });
@@ -492,6 +560,9 @@ fn encodeCommitPayload(allocator: Allocator, writer: anytype, commit: CommitEven
     try entries.append(allocator, .{ .key = "blobs", .value = .{ .array = blob_values.items } });
     try entries.append(allocator, .{ .key = "ops", .value = .{ .array = op_values.items } });
     try entries.append(allocator, .{ .key = "prevData", .value = if (commit.prev_data) |prev_data| .{ .cid = prev_data } else .null });
+    if (commit.rebase) {
+        try entries.append(allocator, .{ .key = "rebase", .value = .{ .boolean = true } });
+    }
     try entries.append(allocator, .{ .key = "repo", .value = .{ .text = commit.repo } });
     try entries.append(allocator, .{ .key = "rev", .value = .{ .text = commit.rev } });
     try entries.append(allocator, .{ .key = "seq", .value = .{ .unsigned = @intCast(commit.seq) } });
@@ -1092,6 +1163,64 @@ test "validate commit event enforces op CID nullability" {
             .cid = record_cid,
             .prev = prev_record_cid,
         }},
+    }));
+}
+
+test "commit event builder names since as since_rev" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const commit_cid = try cbor.Cid.forDagCbor(alloc, "commit");
+    const record_cid = try cbor.Cid.forDagCbor(alloc, "record");
+    const rev = Tid.fromTimestamp(1704067200000000, 1);
+    const since = Tid.fromTimestamp(1704067100000000, 1);
+
+    const frame = try encodeCommitEvent(alloc, .{
+        .seq = 700,
+        .repo_did = "did:plc:builder",
+        .commit_cid = commit_cid,
+        .rev = rev.str(),
+        .since_rev = since.str(),
+        .prev_data = null,
+        .blocks = "car bytes",
+        .ops = &.{.{
+            .action = .create,
+            .collection = "app.bsky.feed.post",
+            .rkey = "3k2builder",
+            .cid = record_cid,
+        }},
+        .time = "2024-01-15T10:30:00Z",
+        .rebase = true,
+    });
+
+    const decoded = try decodeFrame(alloc, frame);
+    try std.testing.expectEqual(@as(i64, 700), decoded.commit.seq);
+    try std.testing.expectEqualStrings("did:plc:builder", decoded.commit.repo);
+    try std.testing.expectEqualStrings(rev.str(), decoded.commit.rev);
+    try std.testing.expectEqualStrings(since.str(), decoded.commit.since.?);
+    try std.testing.expect(decoded.commit.prev_data == null);
+    try std.testing.expect(decoded.commit.rebase);
+    try std.testing.expectEqual(@as(usize, 1), decoded.commit.ops.len);
+    try std.testing.expectEqualStrings("app.bsky.feed.post/3k2builder", decoded.commit.ops[0].path);
+    try std.testing.expectEqualSlices(u8, record_cid.raw, decoded.commit.ops[0].cid.?.raw);
+}
+
+test "commit event builder rejects commit CID as since_rev" {
+    const alloc = std.testing.allocator;
+    const commit_cid = try cbor.Cid.forDagCbor(alloc, "commit");
+    defer alloc.free(commit_cid.raw);
+    const rev = Tid.fromTimestamp(1704067200000000, 1);
+
+    try std.testing.expectError(error.InvalidSince, encodeCommitEvent(alloc, .{
+        .seq = 701,
+        .repo_did = "did:plc:builder",
+        .commit_cid = commit_cid,
+        .rev = rev.str(),
+        .since_rev = "bafyreihyrpefhacm2x43w6c5ylz6dibjtnfubn2noldubqefbzzrskc6sy",
+        .prev_data = null,
+        .blocks = "car bytes",
+        .ops = &.{},
+        .time = "2024-01-15T10:30:00Z",
     }));
 }
 
