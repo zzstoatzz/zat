@@ -1,5 +1,13 @@
 # changelog
 
+## 0.3.8
+
+- **feat**: firehose `#commit` events now have structural validation for repo DID, rev/since TIDs, commit CIDs, op paths, and create/update/delete CID nullability. The new `zat.firehose.encodeCommitEvent` helper builds validated commit event frames from typed params so producers can pass `since_rev` explicitly instead of hand-assembling raw CBOR.
+- **fix**: firehose encoding now preserves op CIDs when records are not decoded locally, carries `prevData: null` explicitly, and round-trips the `rebase` flag.
+- **refactor**: trim low-level public surface by hiding `repo_verifier`, OAuth implementation submodules, and the raw firehose frame encoder while preserving the curated top-level verifier, OAuth, and firehose codec APIs used by downstream consumers.
+- **fix**: pin websocket to the canonical Tangled `websocket.zig` `v0.1.8` release, aligning Zat with the first-party websocket/httpz dependency graph used by ZDS and zlay.
+- **docs**: add `ZDS_PERSPECTIVE.md` and release/zen agent notes documenting the ZDS-driven boundary work and verification loop.
+
 ## 0.3.7
 
 - **feat**: expand `zat.oauth` from low-level PKCE/DPoP/client-assertion helpers into a framework-neutral ATProto OAuth client toolkit. New helpers cover client metadata JSON, authorization-server discovery, authorization URL construction, PAR, code exchange, refresh-token exchange, DPoP nonce retry, and DPoP-authenticated resource requests while leaving cookies, redirects, sessions, and storage policy to applications.
