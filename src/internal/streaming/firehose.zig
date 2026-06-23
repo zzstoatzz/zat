@@ -10,7 +10,6 @@
 //! see: https://atproto.com/specs/event-stream
 
 const std = @import("std");
-const websocket = @import("websocket");
 const cbor = @import("../repo/cbor.zig");
 const car = @import("../repo/car.zig");
 const mst = @import("../repo/mst.zig");
@@ -701,6 +700,7 @@ pub const FirehoseClient = struct {
 
         log.info("connecting to wss://{s}{s}", .{ host, path });
 
+        const websocket = @import("websocket");
         var client = try websocket.Client.init(self.io, self.allocator, .{
             .host = host,
             .port = 443,
@@ -759,7 +759,7 @@ fn WsHandler(comptime H: type) type {
 /// enable TCP keepalive so reads don't block forever when a peer
 /// disappears without FIN/RST (network partition, crash, power loss).
 /// detection time: 10s idle + 5s × 2 probes = 20s.
-fn configureKeepalive(client: *websocket.Client) void {
+fn configureKeepalive(client: anytype) void {
     const fd = client.stream.stream.socket.handle;
     const builtin = @import("builtin");
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.KEEPALIVE, &std.mem.toBytes(@as(i32, 1))) catch return;
