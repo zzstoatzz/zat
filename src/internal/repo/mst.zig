@@ -1089,6 +1089,9 @@ pub const MstEntryData = struct {
     value: []const u8, // raw CID bytes
 };
 
+const max_mst_entries: usize = 10_000;
+const max_mst_key_len: usize = 1024;
+
 pub fn decodeMstNode(allocator: Allocator, data: []const u8) !MstNodeData {
     var pos: usize = 0;
 
@@ -1104,6 +1107,7 @@ pub fn decodeMstNode(allocator: Allocator, data: []const u8) !MstNodeData {
     // entries array
     const arr_hdr = cbor.readArrayHeader(data, pos) catch return error.InvalidMstNode;
     pos = arr_hdr.end;
+    if (arr_hdr.val > max_mst_entries) return error.InvalidMstNode;
     const entries = try allocator.alloc(MstEntryData, @intCast(arr_hdr.val));
     errdefer allocator.free(entries);
     for (entries) |*entry| {
@@ -1119,6 +1123,8 @@ pub fn decodeMstNode(allocator: Allocator, data: []const u8) !MstNodeData {
 
     // left CID or null
     const left_result = readCidOrNull(data, pos) catch return error.InvalidMstNode;
+    pos = left_result.end;
+    if (pos != data.len) return error.InvalidMstNode;
 
     return .{ .left = left_result.val, .entries = entries };
 }
@@ -1138,24 +1144,29 @@ fn readMstEntry(data: []const u8, pos: usize) !MstEntryResult {
     // "k" → key suffix (byte string)
     const key_k = cbor.readText(data, p) catch return error.InvalidMstNode;
     p = key_k.end;
+    if (!std.mem.eql(u8, key_k.val, "k")) return error.InvalidMstNode;
     const key_suffix = cbor.readBytes(data, p) catch return error.InvalidMstNode;
     p = key_suffix.end;
 
     // "p" → prefix length (unsigned int)
     const key_p = cbor.readText(data, p) catch return error.InvalidMstNode;
     p = key_p.end;
+    if (!std.mem.eql(u8, key_p.val, "p")) return error.InvalidMstNode;
     const prefix_len = cbor.readUint(data, p) catch return error.InvalidMstNode;
     p = prefix_len.end;
+    if (prefix_len.val > max_mst_key_len) return error.InvalidMstNode;
 
     // "t" → right subtree CID or null
     const key_t = cbor.readText(data, p) catch return error.InvalidMstNode;
     p = key_t.end;
+    if (!std.mem.eql(u8, key_t.val, "t")) return error.InvalidMstNode;
     const tree_result = readCidOrNull(data, p) catch return error.InvalidMstNode;
     p = tree_result.end;
 
     // "v" → value CID
     const key_v = cbor.readText(data, p) catch return error.InvalidMstNode;
     p = key_v.end;
+    if (!std.mem.eql(u8, key_v.val, "v")) return error.InvalidMstNode;
     const value = cbor.readCidLink(data, p) catch return error.InvalidMstNode;
     p = value.end;
 
@@ -1206,6 +1217,81 @@ test "commonPrefixLen" {
     try std.testing.expectEqual(@as(usize, 2), commonPrefixLen("ab", "abc"));
     try std.testing.expectEqual(@as(usize, 3), commonPrefixLen("abcde", "abc"));
     try std.testing.expectEqual(@as(usize, 0), commonPrefixLen("abcde", "qbb"));
+}
+
+test "decodeMstNode rejects non-canonical node map keys" {
+    const data = &[_]u8{
+        0xa2, // map(2)
+        0x61, 'l', 0xf6, // "l": null
+        0x61, 'e', 0x80, // "e": []
+    };
+
+    try std.testing.expectError(error.InvalidMstNode, decodeMstNode(std.testing.allocator, data));
+}
+
+test "decodeMstNode rejects duplicate node map keys" {
+    const data = &[_]u8{
+        0xa2, // map(2)
+        0x61, 'e', 0x80, // "e": []
+        0x61, 'e', 0x80, // duplicate "e"
+    };
+
+    try std.testing.expectError(error.InvalidMstNode, decodeMstNode(std.testing.allocator, data));
+}
+
+test "decodeMstNode rejects non-canonical entry field order" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const cid = try cbor.Cid.forDagCbor(a, "value");
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(a);
+
+    try data.appendSlice(a, &.{ 0xa2, 0x61, 'e', 0x81 }); // {"e": [
+    try data.appendSlice(a, &.{ 0xa4, 0x61, 'k' }); // { "k":
+    try appendCborBytes(&data, a, "key");
+    try data.appendSlice(a, &.{ 0x61, 't', 0xf6 }); // "t": null before "p"
+    try data.appendSlice(a, &.{ 0x61, 'p', 0x00 }); // "p": 0
+    try data.appendSlice(a, &.{ 0x61, 'v' });
+    try appendCborCid(&data, a, cid);
+    try data.appendSlice(a, &.{ 0x61, 'l', 0xf6 }); // ], "l": null }
+
+    try std.testing.expectError(error.InvalidMstNode, decodeMstNode(a, data.items));
+}
+
+test "decodeMstNode rejects trailing bytes" {
+    const data = &[_]u8{
+        0xa2, // map(2)
+        0x61, 'e', 0x80, // "e": []
+        0x61, 'l', 0xf6, // "l": null
+        0xf6, // trailing null
+    };
+
+    try std.testing.expectError(error.InvalidMstNode, decodeMstNode(std.testing.allocator, data));
+}
+
+test "decodeMstNode rejects oversized prefix length" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const cid = try cbor.Cid.forDagCbor(a, "value");
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(a);
+
+    try data.appendSlice(a, &.{ 0xa2, 0x61, 'e', 0x81 }); // {"e": [
+    try data.appendSlice(a, &.{ 0xa4, 0x61, 'k' });
+    try appendCborBytes(&data, a, "key");
+    try data.appendSlice(a, &.{ 0x61, 'p' });
+    try appendCborArgument(&data, a, 0, max_mst_key_len + 1);
+    try data.appendSlice(a, &.{ 0x61, 't', 0xf6, 0x61, 'v' });
+    try appendCborCid(&data, a, cid);
+    try data.appendSlice(a, &.{ 0x61, 'l', 0xf6 });
+
+    try std.testing.expectError(error.InvalidMstNode, decodeMstNode(a, data.items));
 }
 
 test "put and get" {
