@@ -1,5 +1,13 @@
 # changelog
 
+## 0.3.9
+
+- **fix**: harden MST node decoding by rejecting duplicate or non-canonical node and entry keys, trailing bytes, oversized entry arrays, and oversized prefix lengths.
+- **fix**: full `verifyRepo` now rejects incomplete `com.atproto.sync.getRepo` CARs whose MST references missing node or record blocks, including boundary-truncated CARs that otherwise parse cleanly.
+- **feat**: `verifyCommitCar` adds `require_complete_repo` for callers that need full-repo completeness checks without changing the permissive default for firehose and diff CARs.
+- **feat**: `zat.mst.collectReachableBlocks` collects all MST and record blocks reachable from a block-backed MST root for full repo export and audit paths.
+- **docs**: move the ZDS perspective note into the docs archive.
+
 ## 0.3.8
 
 - **feat**: firehose `#commit` events now have structural validation for repo DID, rev/since TIDs, commit CIDs, op paths, and create/update/delete CID nullability. The new `zat.firehose.encodeCommitEvent` helper builds validated commit event frames from typed params so producers can pass `since_rev` explicitly instead of hand-assembling raw CBOR.
