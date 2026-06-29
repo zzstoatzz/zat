@@ -50,6 +50,7 @@ pub const MstOperation = mst.Operation;
 pub const Commit = repo_verifier.Commit;
 pub const LoadedCommitCar = repo_verifier.LoadedCommitCar;
 pub const loadCommitFromCAR = repo_verifier.loadCommitFromCAR;
+pub const loadCompleteCommitFromCAR = repo_verifier.loadCompleteCommitFromCAR;
 pub const verifyCommitDiff = repo_verifier.verifyCommitDiff;
 pub const CommitDiffResult = repo_verifier.CommitDiffResult;
 

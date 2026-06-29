@@ -51,6 +51,7 @@ pub const VerifyError = error{
     InvalidCommit,
     SignatureNotFound,
     MstRootMismatch,
+    IncompleteRepo,
     FetchFailed,
 } || Allocator.Error;
 
@@ -112,8 +113,14 @@ pub fn verifyCommitCar(
             .cid => |c| c,
             else => return error.InvalidCommit,
         };
-        record_count = walkAndVerifyMst(allocator, repo_car, data_cid.raw) catch |err| switch (err) {
+        record_count = walkAndVerifyMst(allocator, repo_car, data_cid.raw, .{
+            .require_record_blocks = options.require_complete_repo,
+        }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.IncompleteRepo => if (options.require_complete_repo)
+                return error.IncompleteRepo
+            else
+                return error.MstRootMismatch,
             else => return error.MstRootMismatch,
         };
     }
@@ -129,6 +136,7 @@ pub fn verifyCommitCar(
 
 pub const VerifyCommitCarOptions = struct {
     verify_mst: bool = true,
+    require_complete_repo: bool = false,
     expected_did: ?[]const u8 = null,
     max_car_size: ?usize = null, // null = default 2MB
     max_blocks: ?usize = null, // null = default 10,000
@@ -141,6 +149,7 @@ pub const VerifyCommitCarError = error{
     SignatureNotFound,
     SignatureVerificationFailed,
     MstRootMismatch,
+    IncompleteRepo,
     OutOfMemory,
     WriteFailed,
 };
@@ -183,6 +192,7 @@ pub fn verifyRepo(io: std.Io, caller_alloc: Allocator, identifier: []const u8) !
     // 6-10. verify CAR: signature, commit structure, MST
     const commit_result = verifyCommitCar(allocator, car_bytes, public_key, .{
         .expected_did = did_str,
+        .require_complete_repo = true,
         .max_car_size = car_bytes.len, // no size limits — we fetched this ourselves
         .max_blocks = car_bytes.len, // effectively unlimited
     }) catch |err| switch (err) {
@@ -234,23 +244,31 @@ pub fn encodeUnsignedCommit(allocator: Allocator, commit: cbor.Value) ![]u8 {
     return cbor.encodeAlloc(allocator, unsigned_value);
 }
 
+const MstWalkOptions = struct {
+    require_record_blocks: bool = false,
+};
+
 /// walk the MST using the specialized decoder, verifying each key's tree layer
 /// is deterministically correct. combined with CAR block CID verification
 /// (which proves data integrity), this is equivalent to a full MST rebuild.
-fn walkAndVerifyMst(allocator: Allocator, repo_car: car.Car, root_cid_raw: []const u8) !usize {
-    const root_data = car.findBlock(repo_car, root_cid_raw) orelse return error.CommitBlockNotFound;
+///
+/// When `require_record_blocks` is true, this also proves a full repo CAR is
+/// semantically complete by checking that each record CID referenced by the MST
+/// is present in the CAR. Keep it false for intentional diff CARs.
+fn walkAndVerifyMst(allocator: Allocator, repo_car: car.Car, root_cid_raw: []const u8, options: MstWalkOptions) !usize {
+    const root_data = car.findBlock(repo_car, root_cid_raw) orelse return error.IncompleteRepo;
     const root_node = try mst.decodeMstNode(allocator, root_data);
     if (root_node.entries.len == 0 and root_node.left == null) return 0;
 
     // root layer = key height of first entry (first entry always has prefix_len = 0)
     const root_layer = mst.keyHeight(root_node.entries[0].key_suffix);
 
-    return walkVerifyNode(allocator, repo_car, root_node, root_layer);
+    return walkVerifyNode(allocator, repo_car, root_node, root_layer, options);
 }
 
 const WalkError = VerifyError || mst.MstDecodeError;
 
-fn walkVerifyNode(allocator: Allocator, repo_car: car.Car, node: mst.MstNodeData, expected_layer: u32) WalkError!usize {
+fn walkVerifyNode(allocator: Allocator, repo_car: car.Car, node: mst.MstNodeData, expected_layer: u32, options: MstWalkOptions) WalkError!usize {
     var count: usize = 0;
     var key_buf: [512]u8 = undefined;
     var key_len: usize = 0;
@@ -258,7 +276,7 @@ fn walkVerifyNode(allocator: Allocator, repo_car: car.Car, node: mst.MstNodeData
     // left subtree
     if (node.left) |left_cid| {
         if (expected_layer == 0) return error.MstRootMismatch;
-        count += try walkVerifyChild(allocator, repo_car, left_cid, expected_layer - 1);
+        count += try walkVerifyChild(allocator, repo_car, left_cid, expected_layer - 1, options);
     }
 
     for (node.entries) |entry| {
@@ -271,20 +289,24 @@ fn walkVerifyNode(allocator: Allocator, repo_car: car.Car, node: mst.MstNodeData
 
         count += 1;
 
+        if (options.require_record_blocks and car.findBlock(repo_car, entry.value) == null) {
+            return error.IncompleteRepo;
+        }
+
         // right subtree
         if (entry.tree) |tree_cid| {
             if (expected_layer == 0) return error.MstRootMismatch;
-            count += try walkVerifyChild(allocator, repo_car, tree_cid, expected_layer - 1);
+            count += try walkVerifyChild(allocator, repo_car, tree_cid, expected_layer - 1, options);
         }
     }
 
     return count;
 }
 
-fn walkVerifyChild(allocator: Allocator, repo_car: car.Car, cid_raw: []const u8, expected_layer: u32) WalkError!usize {
-    const block_data = car.findBlock(repo_car, cid_raw) orelse return error.CommitBlockNotFound;
+fn walkVerifyChild(allocator: Allocator, repo_car: car.Car, cid_raw: []const u8, expected_layer: u32, options: MstWalkOptions) WalkError!usize {
+    const block_data = car.findBlock(repo_car, cid_raw) orelse return error.IncompleteRepo;
     const node = try mst.decodeMstNode(allocator, block_data);
-    return walkVerifyNode(allocator, repo_car, node, expected_layer);
+    return walkVerifyNode(allocator, repo_car, node, expected_layer, options);
 }
 
 // === sync 1.1: commit diff verification ===
@@ -352,6 +374,20 @@ pub fn loadCommitFromCAR(allocator: Allocator, car_bytes: []const u8) !LoadedCom
         .unsigned_commit_bytes = unsigned_commit_bytes,
         .repo_car = repo_car,
     };
+}
+
+/// Load a full repo CAR and verify that all MST nodes and record blocks
+/// reachable from the commit's data root are present in the CAR.
+///
+/// Use this for `com.atproto.sync.getRepo` responses without `since`. Do not
+/// use it for intentional diff CARs, where unchanged referenced blocks are
+/// legitimately absent.
+pub fn loadCompleteCommitFromCAR(allocator: Allocator, car_bytes: []const u8) !LoadedCommitCar {
+    const loaded = try loadCommitFromCAR(allocator, car_bytes);
+    _ = try walkAndVerifyMst(allocator, loaded.repo_car, loaded.commit.data_cid, .{
+        .require_record_blocks = true,
+    });
+    return loaded;
 }
 
 pub const VerifyCommitDiffOptions = struct {
@@ -565,6 +601,152 @@ test "loadCommitFromCAR extracts commit fields" {
     try std.testing.expectEqual(@as(i64, 3), loaded.commit.version);
     try std.testing.expectEqualSlices(u8, data_cid.raw, loaded.commit.data_cid);
     try std.testing.expect(loaded.commit.prev == null);
+}
+
+const CompleteCarFixture = struct {
+    car_bytes: []const u8,
+    commit_cid: cbor.Cid,
+    root_cid: cbor.Cid,
+    record_cids: []const cbor.Cid,
+    mst_blocks: []const car.Block,
+};
+
+fn buildCompleteCarFixture(allocator: Allocator, record_count: usize) !CompleteCarFixture {
+    var tree = mst.Mst.init(allocator);
+    var record_cids: std.ArrayList(cbor.Cid) = .empty;
+
+    for (0..record_count) |i| {
+        const record = try std.fmt.allocPrint(allocator, "record-{d}", .{i});
+        const record_cid = try cbor.Cid.forDagCbor(allocator, record);
+        try record_cids.append(allocator, record_cid);
+
+        const path = try std.fmt.allocPrint(allocator, "app.bsky.feed.post/{d:0>13}", .{i});
+        try tree.put(path, record_cid);
+    }
+
+    const root_cid = try tree.rootCid();
+    var mst_blocks: std.ArrayList(car.Block) = .empty;
+    try tree.collectBlocks(&mst_blocks);
+
+    const commit_value: cbor.Value = .{ .map = &.{
+        .{ .key = "data", .value = .{ .cid = root_cid } },
+        .{ .key = "did", .value = .{ .text = "did:plc:test123" } },
+        .{ .key = "rev", .value = .{ .text = "3k2abc000000" } },
+        .{ .key = "sig", .value = .{ .bytes = "fakesig" } },
+        .{ .key = "version", .value = .{ .unsigned = 3 } },
+    } };
+    const commit_bytes = try cbor.encodeAlloc(allocator, commit_value);
+    const commit_cid = try cbor.Cid.forDagCbor(allocator, commit_bytes);
+
+    var blocks: std.ArrayList(car.Block) = .empty;
+    try blocks.append(allocator, .{ .cid_raw = commit_cid.raw, .data = commit_bytes });
+    for (mst_blocks.items) |block| try blocks.append(allocator, block);
+    for (record_cids.items, 0..) |record_cid, i| {
+        const record = try std.fmt.allocPrint(allocator, "record-{d}", .{i});
+        try blocks.append(allocator, .{ .cid_raw = record_cid.raw, .data = record });
+    }
+
+    const car_bytes = try car.writeAlloc(allocator, .{
+        .roots = &.{commit_cid},
+        .blocks = blocks.items,
+    });
+
+    return .{
+        .car_bytes = car_bytes,
+        .commit_cid = commit_cid,
+        .root_cid = root_cid,
+        .record_cids = try record_cids.toOwnedSlice(allocator),
+        .mst_blocks = try mst_blocks.toOwnedSlice(allocator),
+    };
+}
+
+fn writeCarWithoutBlock(
+    allocator: Allocator,
+    fixture: CompleteCarFixture,
+    missing_cid: []const u8,
+) ![]const u8 {
+    const loaded = try car.readWithOptions(allocator, fixture.car_bytes, .{
+        .max_size = fixture.car_bytes.len,
+        .max_blocks = fixture.car_bytes.len,
+    });
+
+    var blocks: std.ArrayList(car.Block) = .empty;
+    for (loaded.blocks) |block| {
+        if (std.mem.eql(u8, block.cid_raw, missing_cid)) continue;
+        try blocks.append(allocator, block);
+    }
+    return car.writeAlloc(allocator, .{
+        .roots = loaded.roots,
+        .blocks = blocks.items,
+    });
+}
+
+test "loadCompleteCommitFromCAR accepts complete full repo" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const fixture = try buildCompleteCarFixture(a, 4);
+    const loaded = try loadCompleteCommitFromCAR(a, fixture.car_bytes);
+
+    try std.testing.expectEqualSlices(u8, fixture.commit_cid.raw, loaded.commit_cid);
+    try std.testing.expectEqualSlices(u8, fixture.root_cid.raw, loaded.commit.data_cid);
+}
+
+test "loadCompleteCommitFromCAR rejects missing record block" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const fixture = try buildCompleteCarFixture(a, 4);
+    const partial = try writeCarWithoutBlock(a, fixture, fixture.record_cids[0].raw);
+
+    _ = try loadCommitFromCAR(a, partial);
+    try std.testing.expectError(error.IncompleteRepo, loadCompleteCommitFromCAR(a, partial));
+}
+
+test "loadCompleteCommitFromCAR rejects missing interior MST block" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const fixture = try buildCompleteCarFixture(a, 120);
+    var missing: ?[]const u8 = null;
+    for (fixture.mst_blocks) |block| {
+        if (!std.mem.eql(u8, block.cid_raw, fixture.root_cid.raw)) {
+            missing = block.cid_raw;
+            break;
+        }
+    }
+    try std.testing.expect(missing != null);
+
+    const partial = try writeCarWithoutBlock(a, fixture, missing.?);
+    _ = try loadCommitFromCAR(a, partial);
+    try std.testing.expectError(error.IncompleteRepo, loadCompleteCommitFromCAR(a, partial));
+}
+
+test "loadCompleteCommitFromCAR catches block-boundary truncation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const fixture = try buildCompleteCarFixture(a, 12);
+    var found_boundary_cut = false;
+
+    for (1..fixture.car_bytes.len) |n| {
+        const prefix = fixture.car_bytes[0..n];
+        _ = loadCommitFromCAR(a, prefix) catch continue;
+
+        if (loadCompleteCommitFromCAR(a, prefix)) |_| {
+            continue;
+        } else |err| {
+            try std.testing.expectEqual(error.IncompleteRepo, err);
+            found_boundary_cut = true;
+            break;
+        }
+    }
+
+    try std.testing.expect(found_boundary_cut);
 }
 
 // stress test: pfrazee.com (~192k records on bsky.network)
