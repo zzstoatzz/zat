@@ -382,7 +382,7 @@ pub fn loadCommitFromCAR(allocator: Allocator, car_bytes: []const u8) !LoadedCom
 /// Use this for `com.atproto.sync.getRepo` responses without `since`. Do not
 /// use it for intentional diff CARs, where unchanged referenced blocks are
 /// legitimately absent.
-pub fn loadCompleteCommitFromCAR(allocator: Allocator, car_bytes: []const u8) !LoadedCommitCar {
+fn loadCompleteCommitFromCAR(allocator: Allocator, car_bytes: []const u8) !LoadedCommitCar {
     const loaded = try loadCommitFromCAR(allocator, car_bytes);
     _ = try walkAndVerifyMst(allocator, loaded.repo_car, loaded.commit.data_cid, .{
         .require_record_blocks = true,

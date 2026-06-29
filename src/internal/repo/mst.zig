@@ -1089,7 +1089,7 @@ pub const MstEntryData = struct {
     value: []const u8, // raw CID bytes
 };
 
-pub const max_mst_depth: u32 = 256;
+const max_mst_depth: u32 = 256;
 const max_mst_entries: usize = 10_000;
 const max_mst_key_len: usize = 1024;
 
