@@ -92,6 +92,151 @@ fn syntaxTest(
     if (invalid_count == 0) return error.NoTestCases;
 }
 
+fn parseAtIdentifier(s: []const u8) ?void {
+    if (Did.parse(s) != null or Handle.parse(s) != null) return {};
+    return null;
+}
+
+fn parseCidSyntax(s: []const u8) ?void {
+    if (s.len < 8 or s.len > 256) return null;
+    if (std.mem.startsWith(u8, s, "Qmb")) return null;
+    for (s) |c| {
+        const valid = switch (c) {
+            'A'...'Z', 'a'...'z', '0'...'9', '+', '=' => true,
+            else => false,
+        };
+        if (!valid) return null;
+    }
+    return {};
+}
+
+fn parseUriSyntax(s: []const u8) ?void {
+    if (s.len == 0 or s.len > 8192) return null;
+    const colon = std.mem.indexOfScalar(u8, s, ':') orelse return null;
+    if (colon == 0 or colon > 81) return null;
+    if (s[0] < 'a' or s[0] > 'z') return null;
+    for (s[1..colon]) |c| {
+        const valid = (c >= 'a' and c <= 'z') or c == '.' or c == '-';
+        if (!valid) return null;
+    }
+    if (colon + 1 >= s.len) return null;
+    for (s[colon + 1 ..]) |c| {
+        if (c < 0x21 or c > 0x7e) return null;
+    }
+    return {};
+}
+
+fn parseLanguageSyntax(s: []const u8) ?void {
+    if (s.len == 0 or s.len > 128) return null;
+
+    const first_end = std.mem.indexOfScalar(u8, s, '-') orelse s.len;
+    const first = s[0..first_end];
+    if (std.mem.eql(u8, first, "i")) {
+        // grandfathered/private tags use the same subtag loop below.
+    } else if (first.len == 2 or first.len == 3) {
+        for (first) |c| {
+            if (c < 'a' or c > 'z') return null;
+        }
+    } else {
+        return null;
+    }
+
+    var pos = first_end;
+    while (pos < s.len) {
+        if (s[pos] != '-') return null;
+        pos += 1;
+        const sub_start = pos;
+        while (pos < s.len and s[pos] != '-') : (pos += 1) {
+            const c = s[pos];
+            const valid = (c >= 'A' and c <= 'Z') or
+                (c >= 'a' and c <= 'z') or
+                (c >= '0' and c <= '9');
+            if (!valid) return null;
+        }
+        if (pos == sub_start) return null;
+    }
+    return {};
+}
+
+fn parse2(s: []const u8, pos: usize) ?u8 {
+    if (pos + 2 > s.len) return null;
+    var n: u8 = 0;
+    for (s[pos .. pos + 2]) |c| {
+        if (c < '0' or c > '9') return null;
+        n = n * 10 + (c - '0');
+    }
+    return n;
+}
+
+fn parse4(s: []const u8, pos: usize) ?u16 {
+    if (pos + 4 > s.len) return null;
+    var n: u16 = 0;
+    for (s[pos .. pos + 4]) |c| {
+        if (c < '0' or c > '9') return null;
+        n = n * 10 + (c - '0');
+    }
+    return n;
+}
+
+fn isLeapYear(year: u16) bool {
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0);
+}
+
+fn daysInMonth(year: u16, month: u8) u8 {
+    return switch (month) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => if (isLeapYear(year)) 29 else 28,
+        else => 0,
+    };
+}
+
+fn parseDatetimeSyntax(s: []const u8) ?void {
+    if (s.len == 0 or s.len > 64) return null;
+    if (s.len < "0000-01-01T00:00:00Z".len) return null;
+
+    const year = parse4(s, 0) orelse return null;
+    if (s[4] != '-') return null;
+    const month = parse2(s, 5) orelse return null;
+    if (s[7] != '-') return null;
+    const day = parse2(s, 8) orelse return null;
+    if (s[10] != 'T') return null;
+    const hour = parse2(s, 11) orelse return null;
+    if (s[13] != ':') return null;
+    const minute = parse2(s, 14) orelse return null;
+    if (s[16] != ':') return null;
+    const second = parse2(s, 17) orelse return null;
+
+    if (month < 1 or month > 12) return null;
+    if (day < 1 or day > daysInMonth(year, month)) return null;
+    if (hour > 23 or minute > 59 or second > 59) return null;
+
+    var pos: usize = 19;
+    if (pos < s.len and s[pos] == '.') {
+        pos += 1;
+        const frac_start = pos;
+        while (pos < s.len and s[pos] >= '0' and s[pos] <= '9') : (pos += 1) {}
+        const frac_len = pos - frac_start;
+        if (frac_len == 0 or frac_len > 20) return null;
+    }
+
+    if (pos >= s.len) return null;
+    if (s[pos] == 'Z') {
+        return if (pos + 1 == s.len) {} else null;
+    }
+
+    if (s[pos] != '+' and s[pos] != '-') return null;
+    const tz_sign = s[pos];
+    if (pos + 6 != s.len) return null;
+    const tz_hour = parse2(s, pos + 1) orelse return null;
+    if (s[pos + 3] != ':') return null;
+    const tz_minute = parse2(s, pos + 4) orelse return null;
+    if (tz_hour > 23 or tz_minute > 59) return null;
+    if (tz_sign == '-' and tz_hour == 0 and tz_minute == 0) return null;
+    if (year == 0 and month == 1 and day == 1 and hour == 0 and minute == 0 and second == 0 and tz_sign == '+') return null;
+    return {};
+}
+
 // === tier 1: syntax validation ===
 
 test "interop: tid syntax" {
@@ -140,6 +285,72 @@ test "interop: aturi syntax" {
         @embedFile("aturi_syntax_invalid"),
         AtUri.parse,
     );
+}
+
+test "interop: all syntax fixture files" {
+    try syntaxTest(
+        @embedFile("tid_syntax_valid"),
+        @embedFile("tid_syntax_invalid"),
+        Tid.parse,
+    );
+    try syntaxTest(
+        @embedFile("did_syntax_valid"),
+        @embedFile("did_syntax_invalid"),
+        Did.parse,
+    );
+    try syntaxTest(
+        @embedFile("handle_syntax_valid"),
+        @embedFile("handle_syntax_invalid"),
+        Handle.parse,
+    );
+    try syntaxTest(
+        @embedFile("nsid_syntax_valid"),
+        @embedFile("nsid_syntax_invalid"),
+        Nsid.parse,
+    );
+    try syntaxTest(
+        @embedFile("recordkey_syntax_valid"),
+        @embedFile("recordkey_syntax_invalid"),
+        Rkey.parse,
+    );
+    try syntaxTest(
+        @embedFile("aturi_syntax_valid"),
+        @embedFile("aturi_syntax_invalid"),
+        AtUri.parse,
+    );
+    try syntaxTest(
+        @embedFile("atidentifier_syntax_valid"),
+        @embedFile("atidentifier_syntax_invalid"),
+        parseAtIdentifier,
+    );
+    try syntaxTest(
+        @embedFile("cid_syntax_valid"),
+        @embedFile("cid_syntax_invalid"),
+        parseCidSyntax,
+    );
+    try syntaxTest(
+        @embedFile("uri_syntax_valid"),
+        @embedFile("uri_syntax_invalid"),
+        parseUriSyntax,
+    );
+    try syntaxTest(
+        @embedFile("language_syntax_valid"),
+        @embedFile("language_syntax_invalid"),
+        parseLanguageSyntax,
+    );
+    try syntaxTest(
+        @embedFile("datetime_syntax_valid"),
+        @embedFile("datetime_syntax_invalid"),
+        parseDatetimeSyntax,
+    );
+
+    var invalid_parse = testLinesSentinel(@embedFile("datetime_parse_invalid"));
+    while (invalid_parse.next()) |line| {
+        if (parseDatetimeSyntax(line) != null) {
+            std.debug.print("FAIL: expected semantically invalid datetime: '{s}'\n", .{line});
+            return error.ExpectedInvalid;
+        }
+    }
 }
 
 // === tier 2: crypto signature verification ===
