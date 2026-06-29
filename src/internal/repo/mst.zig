@@ -1089,8 +1089,39 @@ pub const MstEntryData = struct {
     value: []const u8, // raw CID bytes
 };
 
+pub const max_mst_depth: u32 = 256;
 const max_mst_entries: usize = 10_000;
 const max_mst_key_len: usize = 1024;
+
+pub const ReachableCollectOptions = struct {
+    max_depth: u32 = max_mst_depth,
+    include_records: bool = true,
+};
+
+pub const ReachableBlocksError = error{
+    PartialTree,
+    InvalidMstNode,
+    MaxDepthExceeded,
+} || Allocator.Error;
+
+/// Collect blocks reachable from an MST root CID using a content-addressed
+/// block reader.
+///
+/// This is for full repo export and audit paths. It differs from
+/// `Mst.collectBlocks`, which intentionally emits only the loaded/dirty MST
+/// surface needed for commit diff CARs. Blocks appended here are copied into
+/// `allocator`, so they remain valid after each `BlockReader.get` call returns.
+pub fn collectReachableBlocks(
+    allocator: Allocator,
+    root_cid_raw: []const u8,
+    block_reader: BlockReader,
+    out: *std.ArrayList(car.Block),
+    options: ReachableCollectOptions,
+) ReachableBlocksError!void {
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(allocator);
+    try collectReachableNode(allocator, root_cid_raw, block_reader, out, &seen, options, 0);
+}
 
 pub fn decodeMstNode(allocator: Allocator, data: []const u8) !MstNodeData {
     var pos: usize = 0;
@@ -1127,6 +1158,66 @@ pub fn decodeMstNode(allocator: Allocator, data: []const u8) !MstNodeData {
     if (pos != data.len) return error.InvalidMstNode;
 
     return .{ .left = left_result.val, .entries = entries };
+}
+
+fn collectReachableNode(
+    allocator: Allocator,
+    cid_raw: []const u8,
+    block_reader: BlockReader,
+    out: *std.ArrayList(car.Block),
+    seen: *std.StringHashMapUnmanaged(void),
+    options: ReachableCollectOptions,
+    depth: u32,
+) ReachableBlocksError!void {
+    if (depth > options.max_depth) return error.MaxDepthExceeded;
+
+    const block_data = try appendReachableBlock(allocator, cid_raw, block_reader, out, seen);
+    if (block_data == null) return;
+
+    const node = decodeMstNode(allocator, block_data.?) catch return error.InvalidMstNode;
+    defer allocator.free(node.entries);
+
+    if (node.left) |left| {
+        try collectReachableNode(allocator, left, block_reader, out, seen, options, depth + 1);
+    }
+
+    for (node.entries) |entry| {
+        if (options.include_records) {
+            _ = try appendReachableBlock(allocator, entry.value, block_reader, out, seen);
+        }
+        if (entry.tree) |right| {
+            try collectReachableNode(allocator, right, block_reader, out, seen, options, depth + 1);
+        }
+    }
+}
+
+fn appendReachableBlock(
+    allocator: Allocator,
+    cid_raw: []const u8,
+    block_reader: BlockReader,
+    out: *std.ArrayList(car.Block),
+    seen: *std.StringHashMapUnmanaged(void),
+) ReachableBlocksError!?[]const u8 {
+    if (seen.contains(cid_raw)) return null;
+
+    const block_data = block_reader.get(cid_raw) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.PartialTree,
+    };
+    const data = block_data orelse return error.PartialTree;
+
+    const cid_copy = try allocator.dupe(u8, cid_raw);
+    errdefer allocator.free(cid_copy);
+    const data_copy = try allocator.dupe(u8, data);
+    errdefer allocator.free(data_copy);
+
+    try seen.put(allocator, cid_copy, {});
+    errdefer _ = seen.remove(cid_copy);
+    try out.append(allocator, .{
+        .cid_raw = cid_copy,
+        .data = data_copy,
+    });
+    return data_copy;
 }
 
 const MstEntryResult = struct {
@@ -1604,6 +1695,13 @@ const TestBlockStore = struct {
     blocks: std.StringHashMapUnmanaged([]const u8) = .empty,
     loads: usize = 0,
 
+    fn putBlock(self: *TestBlockStore, allocator: Allocator, data: []const u8) !cbor.Cid {
+        const block_data = try allocator.dupe(u8, data);
+        const cid = try cbor.Cid.forDagCbor(allocator, block_data);
+        try self.blocks.put(allocator, cid.raw, block_data);
+        return cid;
+    }
+
     fn putNode(self: *TestBlockStore, allocator: Allocator, tree: *Mst, node: *Node) !cbor.Cid {
         if (node.left) |left| _ = try self.putNode(allocator, tree, left);
         for (node.entries.items) |entry| {
@@ -1684,6 +1782,50 @@ test "rootCid caches clean root and put dirties it" {
     const root3 = try tree.rootCid();
     try std.testing.expect(!tree.root.?.dirty);
     try std.testing.expect(!std.mem.eql(u8, root1.raw, root3.raw));
+}
+
+test "collectReachableBlocks includes records once" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var store = TestBlockStore{};
+    const record_cid = try store.putBlock(a, "shared record block");
+
+    var tree = Mst.init(a);
+    try tree.put("app.bsky.feed.post/1", record_cid);
+    try tree.put("app.bsky.feed.post/2", record_cid);
+    const root_cid = try store.putNode(a, &tree, tree.root.?);
+
+    var blocks: std.ArrayList(car.Block) = .empty;
+    try collectReachableBlocks(a, root_cid.raw, store.reader(), &blocks, .{});
+
+    try std.testing.expectEqual(@as(usize, 2), blocks.items.len);
+    try std.testing.expectEqual(@as(usize, 2), store.loads);
+    try std.testing.expectEqualSlices(u8, root_cid.raw, blocks.items[0].cid_raw);
+    try std.testing.expectEqualSlices(u8, record_cid.raw, blocks.items[1].cid_raw);
+    try std.testing.expectEqualStrings("shared record block", blocks.items[1].data);
+}
+
+test "collectReachableBlocks reports missing record block" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var store = TestBlockStore{};
+    const record_cid = try cbor.Cid.forDagCbor(a, "missing record block");
+
+    var tree = Mst.init(a);
+    try tree.put("app.bsky.feed.post/1", record_cid);
+    const root_cid = try store.putNode(a, &tree, tree.root.?);
+
+    var blocks: std.ArrayList(car.Block) = .empty;
+    try std.testing.expectError(
+        error.PartialTree,
+        collectReachableBlocks(a, root_cid.raw, store.reader(), &blocks, .{}),
+    );
 }
 
 const WalkCollector = struct {
