@@ -55,6 +55,9 @@ pub const AtUri = struct {
 
         const auth_str = after_prefix[0 .. authority_end_rel orelse after_prefix.len];
         if (auth_str.len == 0) return null;
+        // AT URI authorities are not generic URI authorities; do not accept
+        // percent-encoded DID or handle spellings.
+        if (std.mem.indexOfScalar(u8, auth_str, '%') != null) return null;
 
         // authority must be a valid DID or handle
         if (Did.parse(auth_str) == null and Handle.parse(auth_str) == null) return null;
@@ -140,6 +143,16 @@ pub const AtUri = struct {
         collection_str: ?[]const u8,
         rkey_str: ?[]const u8,
     ) ?[]const u8 {
+        if (std.mem.indexOfScalar(u8, authority_str, '%') != null) return null;
+        if (Did.parse(authority_str) == null and Handle.parse(authority_str) == null) return null;
+        if (collection_str == null and rkey_str != null) return null;
+        if (collection_str) |c| {
+            if (Nsid.parse(c) == null) return null;
+        }
+        if (rkey_str) |r| {
+            if (Rkey.parse(r) == null) return null;
+        }
+
         var total_len = prefix.len + authority_str.len;
         if (collection_str) |c| {
             total_len += 1 + c.len;
@@ -199,6 +212,29 @@ test "valid: full uri with handle" {
     try std.testing.expectEqualStrings("abc123", uri.rkey().?);
 }
 
+test "valid: generic DID authority" {
+    const uri = AtUri.parse("at://did:abc:123/io.nsid.someFunc/record-key") orelse return error.InvalidUri;
+    try std.testing.expectEqualStrings("did:abc:123", uri.authority());
+    try std.testing.expectEqualStrings("io.nsid.someFunc", uri.collection().?);
+    try std.testing.expectEqualStrings("record-key", uri.rkey().?);
+}
+
+test "valid: permissive record-key punctuation from current spec" {
+    const valid = [_][]const u8{
+        "at://did:abc:123/io.nsid.someFunc/self.",
+        "at://did:abc:123/io.nsid.someFunc/lang:",
+        "at://did:abc:123/io.nsid.someFunc/:",
+        "at://did:abc:123/io.nsid.someFunc/-",
+        "at://did:abc:123/io.nsid.someFunc/_",
+        "at://did:abc:123/io.nsid.someFunc/~",
+        "at://did:abc:123/io.nsid.someFunc/...",
+    };
+
+    for (valid) |s| {
+        try std.testing.expect(AtUri.parse(s) != null);
+    }
+}
+
 test "valid: authority only" {
     const uri = AtUri.parse("at://did:plc:z72i7hdynmk6r22z27h6tvur") orelse return error.InvalidUri;
     try std.testing.expectEqualStrings("did:plc:z72i7hdynmk6r22z27h6tvur", uri.authority());
@@ -241,6 +277,41 @@ test "invalid: empty rkey" {
     try std.testing.expect(AtUri.parse("at://did:plc:xyz/collection/") == null);
 }
 
+test "invalid: query fragment and extra path segments" {
+    try std.testing.expect(AtUri.parse("at://did:plc:xyz/app.bsky.feed.post/abc?query") == null);
+    try std.testing.expect(AtUri.parse("at://did:plc:xyz/app.bsky.feed.post/abc#frag") == null);
+    try std.testing.expect(AtUri.parse("at://did:plc:xyz/app.bsky.feed.post/abc/extra") == null);
+    try std.testing.expect(AtUri.parse("at://did:plc:xyz/app.bsky.feed.post//") == null);
+}
+
+test "invalid: percent-encoded authority" {
+    try std.testing.expect(AtUri.parse("at://did:web:localhost%3A1234/app.bsky.feed.post/abc") == null);
+    try std.testing.expect(AtUri.parse("at://did:method:val%BB") == null);
+    try std.testing.expect(AtUri.parse("at://did%3Aplc%3Amy_did") == null);
+    try std.testing.expect(AtUri.parse("at://did%3Aplc%3Amy_did/com.atproto.feed.post/record") == null);
+    try std.testing.expect(AtUri.parse("at://user%2Ebsky%2Esocial") == null);
+}
+
+test "invalid: proposed triple-slash form is not current syntax" {
+    try std.testing.expect(AtUri.parse("at:///did:plc:xyz/app.bsky.feed.post/abc") == null);
+}
+
+test "invalid: record-key reserved characters" {
+    const invalid = [_][]const u8{
+        "at://did:plc:xyz/app.bsky.feed.post/%23",
+        "at://did:plc:xyz/app.bsky.feed.post/$",
+        "at://did:plc:xyz/app.bsky.feed.post/@",
+        "at://did:plc:xyz/app.bsky.feed.post/!",
+        "at://did:plc:xyz/app.bsky.feed.post/*",
+        "at://did:plc:xyz/app.bsky.feed.post/.",
+        "at://did:plc:xyz/app.bsky.feed.post/..",
+    };
+
+    for (invalid) |s| {
+        try std.testing.expect(AtUri.parse(s) == null);
+    }
+}
+
 test "format: full uri" {
     var buf: [256]u8 = undefined;
     const result = AtUri.format(&buf, "did:plc:xyz", "app.bsky.feed.post", "abc123") orelse return error.BufferTooSmall;
@@ -257,4 +328,12 @@ test "format: authority and collection" {
     var buf: [256]u8 = undefined;
     const result = AtUri.format(&buf, "did:plc:xyz", "app.bsky.feed.post", null) orelse return error.BufferTooSmall;
     try std.testing.expectEqualStrings("at://did:plc:xyz/app.bsky.feed.post", result);
+}
+
+test "format: rejects invalid components" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expect(AtUri.format(&buf, "did:web:localhost%3A1234", "app.bsky.feed.post", "abc") == null);
+    try std.testing.expect(AtUri.format(&buf, "did:plc:xyz", null, "abc") == null);
+    try std.testing.expect(AtUri.format(&buf, "did:plc:xyz", "short", "abc") == null);
+    try std.testing.expect(AtUri.format(&buf, "did:plc:xyz", "app.bsky.feed.post", "abc/def") == null);
 }
