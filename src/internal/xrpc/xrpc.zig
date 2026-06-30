@@ -45,7 +45,7 @@ pub const XrpcClient = struct {
         const url = try self.buildUrl(nsid, params);
         defer self.allocator.free(url);
 
-        return try self.doRequest(url, null);
+        return try self.doRequest(.GET, url, null);
     }
 
     /// call a procedure method (POST)
@@ -53,7 +53,7 @@ pub const XrpcClient = struct {
         const url = try self.buildUrl(nsid, null);
         defer self.allocator.free(url);
 
-        return try self.doRequest(url, body);
+        return try self.doRequest(.POST, url, body);
     }
 
     pub fn queryChecked(
@@ -65,7 +65,7 @@ pub const XrpcClient = struct {
         const url = try self.buildUrl(nsid, params);
         defer self.allocator.free(url);
 
-        return try self.requestCheckedUrl(url, null, retry_policy);
+        return try self.requestCheckedUrl(.GET, url, null, retry_policy);
     }
 
     pub fn procedureChecked(
@@ -77,7 +77,7 @@ pub const XrpcClient = struct {
         const url = try self.buildUrl(nsid, null);
         defer self.allocator.free(url);
 
-        return try self.requestCheckedUrl(url, body, retry_policy);
+        return try self.requestCheckedUrl(.POST, url, body, retry_policy);
     }
 
     fn buildUrl(self: *XrpcClient, nsid: Nsid, params: ?std.StringHashMap([]const u8)) ![]u8 {
@@ -110,7 +110,7 @@ pub const XrpcClient = struct {
         return try url.toOwnedSlice(self.allocator);
     }
 
-    fn doRequest(self: *XrpcClient, url: []const u8, body: ?[]const u8) !Response {
+    fn doRequest(self: *XrpcClient, method: std.http.Method, url: []const u8, body: ?[]const u8) !Response {
         var auth_header_buf: [max_auth_header_len]u8 = undefined;
         const auth_value: ?[]const u8 = if (self.access_token) |token|
             std.fmt.bufPrint(&auth_header_buf, "Bearer {s}", .{token}) catch null
@@ -119,7 +119,7 @@ pub const XrpcClient = struct {
 
         const result = try self.transport.fetch(.{
             .url = url,
-            .method = if (body != null) .POST else .GET,
+            .method = method,
             .payload = body,
             .authorization = auth_value,
         });
@@ -132,13 +132,13 @@ pub const XrpcClient = struct {
         };
     }
 
-    fn requestCheckedUrl(self: *XrpcClient, url: []const u8, body: ?[]const u8, retry_policy: RetryPolicy) !Result {
+    fn requestCheckedUrl(self: *XrpcClient, method: std.http.Method, url: []const u8, body: ?[]const u8, retry_policy: RetryPolicy) !Result {
         const attempts = @max(@as(u8, 1), retry_policy.max_attempts);
         var attempt: u8 = 0;
 
         while (true) : (attempt += 1) {
-            var response = self.doRequest(url, body) catch |err| {
-                if (attempt + 1 >= attempts or !retry_policy.retry_transient_errors or !isRetryableTransportError(err)) {
+            var response = self.doRequest(method, url, body) catch |err| {
+                if (attempt + 1 >= attempts or !retry_policy.retry_transient_errors or !isRetryableTransportErrorForMethod(method, err)) {
                     return err;
                 }
                 try retry_policy.sleepBeforeRetry(self.transport.io, attempt, null);
@@ -149,7 +149,7 @@ pub const XrpcClient = struct {
                 return .{ .ok = response };
             }
 
-            if (attempt + 1 < attempts and retry_policy.isRetryableStatus(response.status)) {
+            if (attempt + 1 < attempts and retry_policy.isRetryableStatusForMethod(method, response.status)) {
                 const rate_limit = response.rate_limit;
                 response.deinit();
                 try retry_policy.sleepBeforeRetry(self.transport.io, attempt, rate_limit);
@@ -248,6 +248,12 @@ pub const XrpcClient = struct {
             };
         }
 
+        pub fn isRetryableStatusForMethod(self: RetryPolicy, method: std.http.Method, status: std.http.Status) bool {
+            if (!self.isRetryableStatus(status)) return false;
+            if (method == .POST and status != .too_many_requests) return false;
+            return true;
+        }
+
         pub fn delayMillis(self: RetryPolicy, attempt: u8, rate_limit: ?HttpTransport.RateLimitHeaders) u64 {
             return self.delayMillisAt(attempt, rate_limit, null);
         }
@@ -305,7 +311,11 @@ pub const XrpcClient = struct {
     };
 };
 
-fn isRetryableTransportError(err: anyerror) bool {
+fn isRetryableTransportErrorForMethod(method: std.http.Method, err: anyerror) bool {
+    if (method == .POST) {
+        return err == error.ConnectionRefused;
+    }
+
     return switch (err) {
         error.ConnectionRefused,
         error.ConnectionResetByPeer,
@@ -395,6 +405,15 @@ test "retry policy is conservative and deterministic" {
     try std.testing.expect(!policy.isRetryableStatus(.bad_request));
     try std.testing.expect(!policy.isRetryableStatus(.unauthorized));
     try std.testing.expect(!policy.isRetryableStatus(.not_found));
+
+    try std.testing.expect(policy.isRetryableStatusForMethod(.GET, .service_unavailable));
+    try std.testing.expect(policy.isRetryableStatusForMethod(.GET, .too_many_requests));
+    try std.testing.expect(!policy.isRetryableStatusForMethod(.POST, .service_unavailable));
+    try std.testing.expect(policy.isRetryableStatusForMethod(.POST, .too_many_requests));
+
+    try std.testing.expect(isRetryableTransportErrorForMethod(.GET, error.ConnectionResetByPeer));
+    try std.testing.expect(isRetryableTransportErrorForMethod(.POST, error.ConnectionRefused));
+    try std.testing.expect(!isRetryableTransportErrorForMethod(.POST, error.ConnectionResetByPeer));
 
     try std.testing.expectEqual(@as(u64, 100), policy.delayMillis(0, null));
     try std.testing.expectEqual(@as(u64, 200), policy.delayMillis(1, null));

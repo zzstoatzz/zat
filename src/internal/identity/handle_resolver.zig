@@ -119,7 +119,7 @@ pub const HandleResolver = struct {
         return self.didFromDohBody(result.body);
     }
 
-    /// parse a Cloudflare DoH JSON body and extract the first valid `did=` TXT value.
+    /// parse a Cloudflare DoH JSON body and extract exactly one valid `did=` TXT value.
     fn didFromDohBody(self: *HandleResolver, body: []const u8) ![]const u8 {
         // Cloudflare appends an unknown `Comment` field for DNSSEC zones, so the
         // parse must tolerate fields `DnsResponse` doesn't declare.
@@ -136,16 +136,25 @@ pub const HandleResolver = struct {
             return error.NoDnsRecordsFound;
         }
 
+        var found: ?[]const u8 = null;
+        var found_count: usize = 0;
         for (dns_response.Answer.?) |answer| {
             const data = answer.data orelse continue;
             const did_str = extractDidFromTxt(data) orelse continue;
-
-            if (Did.parse(did_str) != null) {
-                return try self.allocator.dupe(u8, did_str);
-            }
+            found_count += 1;
+            found = did_str;
         }
 
-        return error.NoValidDidFound;
+        if (found_count != 1) {
+            return error.NoValidDidFound;
+        }
+
+        const did_str = found.?;
+        if (Did.parse(did_str) == null) {
+            return error.NoValidDidFound;
+        }
+
+        return try self.allocator.dupe(u8, did_str);
     }
 };
 
@@ -207,6 +216,37 @@ test "didFromDohBody tolerates Cloudflare DNSSEC Comment field" {
     defer std.testing.allocator.free(did);
 
     try std.testing.expectEqualStrings("did:plc:yk4dd2qkboz2yv6tpubpc6co", did);
+}
+
+test "didFromDohBody requires exactly one did TXT record" {
+    var resolver = HandleResolver.init(std.Options.debug_io, std.testing.allocator);
+    defer resolver.deinit();
+
+    const single =
+        \\{"Status":0,"TC":false,"RD":true,"RA":true,"AD":false,"CD":false,
+        \\ "Answer":[
+        \\   {"name":"_atproto.example.com","type":16,"TTL":300,"data":"\"foo=bar\""},
+        \\   {"name":"_atproto.example.com","type":16,"TTL":300,"data":"\"did=did:plc:abc123\""}
+        \\ ]}
+    ;
+    const did = try resolver.didFromDohBody(single);
+    defer std.testing.allocator.free(did);
+    try std.testing.expectEqualStrings("did:plc:abc123", did);
+
+    const multiple =
+        \\{"Status":0,"TC":false,"RD":true,"RA":true,"AD":false,"CD":false,
+        \\ "Answer":[
+        \\   {"name":"_atproto.example.com","type":16,"TTL":300,"data":"\"did=did:plc:abc123\""},
+        \\   {"name":"_atproto.example.com","type":16,"TTL":300,"data":"\"did=did:plc:def456\""}
+        \\ ]}
+    ;
+    try std.testing.expectError(error.NoValidDidFound, resolver.didFromDohBody(multiple));
+
+    const invalid =
+        \\{"Status":0,"TC":false,"RD":true,"RA":true,"AD":false,"CD":false,
+        \\ "Answer":[{"name":"_atproto.example.com","type":16,"TTL":300,"data":"\"did=not-a-did\""}]}
+    ;
+    try std.testing.expectError(error.NoValidDidFound, resolver.didFromDohBody(invalid));
 }
 
 test "resolve handle (http) - integration" {

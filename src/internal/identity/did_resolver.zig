@@ -62,47 +62,17 @@ pub const DidResolver = struct {
 
     /// resolve did:web via .well-known
     fn resolveWeb(self: *DidResolver, did: Did) !DidDocument {
-        // did:web:example.com -> https://example.com/.well-known/did.json
-        // did:web:example.com:path:to -> https://example.com/path/to/did.json
-        const domain_and_path = did.raw["did:web:".len..];
-
-        // decode percent-encoded colons in path
-        var url_buf: std.ArrayList(u8) = .empty;
-        defer url_buf.deinit(self.allocator);
-
-        try url_buf.appendSlice(self.allocator, "https://");
-
-        var first_segment = true;
-        var it = std.mem.splitScalar(u8, domain_and_path, ':');
-        while (it.next()) |segment| {
-            if (first_segment) {
-                // first segment is the domain
-                try url_buf.appendSlice(self.allocator, segment);
-                first_segment = false;
-            } else {
-                // subsequent segments are path components
-                try url_buf.append(self.allocator, '/');
-                try url_buf.appendSlice(self.allocator, segment);
-            }
-        }
-
-        // add .well-known/did.json or /did.json
-        if (std.mem.indexOf(u8, domain_and_path, ":") == null) {
-            // no path, use .well-known
-            try url_buf.appendSlice(self.allocator, "/.well-known/did.json");
-        } else {
-            // has path, append did.json
-            try url_buf.appendSlice(self.allocator, "/did.json");
-        }
+        const url = try buildDidWebDocumentUrl(self.allocator, did);
+        defer self.allocator.free(url);
 
         var checked_url = try network_safety.resolveIdentityUrl(
             self.allocator,
             &self.transport,
             self.doh_endpoint,
-            url_buf.items,
+            url,
         );
         defer checked_url.deinit(self.allocator);
-        return try self.fetchDidDocument(url_buf.items, checked_url.resolvedConnection());
+        return try self.fetchDidDocument(url, checked_url.resolvedConnection());
     }
 
     /// fetch and parse a did document from url
@@ -126,6 +96,44 @@ pub const DidResolver = struct {
         return try DidDocument.parse(self.allocator, result.body);
     }
 };
+
+fn buildDidWebDocumentUrl(allocator: std.mem.Allocator, did: Did) ![]u8 {
+    const identifier = did.identifier();
+    if (identifier.len == 0 or std.mem.indexOfScalar(u8, identifier, ':') != null) {
+        return error.UnsupportedDidMethod;
+    }
+
+    const authority = try percentDecodeAlloc(allocator, identifier);
+    defer allocator.free(authority);
+
+    const scheme: []const u8 = if (std.mem.eql(u8, authority, "localhost") or std.mem.startsWith(u8, authority, "localhost:"))
+        "http"
+    else
+        "https";
+
+    return try std.fmt.allocPrint(allocator, "{s}://{s}/.well-known/did.json", .{ scheme, authority });
+}
+
+fn percentDecodeAlloc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] != '%') {
+            try out.append(allocator, input[i]);
+            i += 1;
+            continue;
+        }
+
+        if (i + 2 >= input.len) return error.InvalidPercentEncoding;
+        const byte = std.fmt.parseInt(u8, input[i + 1 .. i + 3], 16) catch return error.InvalidPercentEncoding;
+        try out.append(allocator, byte);
+        i += 3;
+    }
+
+    return try out.toOwnedSlice(allocator);
+}
 
 // === tests ===
 
@@ -171,21 +179,18 @@ test "did:web loopback host is rejected before fetch" {
 }
 
 test "did:web url construction" {
-    // test url building without network
-    var resolver = DidResolver.init(std.Options.debug_io, std.testing.allocator);
-    defer resolver.deinit();
+    const simple = try buildDidWebDocumentUrl(std.testing.allocator, Did.parse("did:web:example.com").?);
+    defer std.testing.allocator.free(simple);
+    try std.testing.expectEqualStrings("https://example.com/.well-known/did.json", simple);
 
-    // simple domain
-    {
-        const did = Did.parse("did:web:example.com").?;
-        _ = did;
-        // would resolve to https://example.com/.well-known/did.json
-    }
+    const with_port = try buildDidWebDocumentUrl(std.testing.allocator, Did.parse("did:web:example.com%3A3000").?);
+    defer std.testing.allocator.free(with_port);
+    try std.testing.expectEqualStrings("https://example.com:3000/.well-known/did.json", with_port);
 
-    // domain with path
-    {
-        const did = Did.parse("did:web:example.com:user:alice").?;
-        _ = did;
-        // would resolve to https://example.com/user/alice/did.json
-    }
+    const localhost = try buildDidWebDocumentUrl(std.testing.allocator, Did.parse("did:web:localhost%3A3000").?);
+    defer std.testing.allocator.free(localhost);
+    try std.testing.expectEqualStrings("http://localhost:3000/.well-known/did.json", localhost);
+
+    try std.testing.expectError(error.UnsupportedDidMethod, buildDidWebDocumentUrl(std.testing.allocator, Did.parse("did:web:example.com:user:alice").?));
+    try std.testing.expectError(error.InvalidPercentEncoding, buildDidWebDocumentUrl(std.testing.allocator, Did.parse("did:web:example.com%xx").?));
 }
