@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 600" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title>Zat as a Zig substrate for atproto infrastructure</title>
+  <desc>Layered diagram showing Zat protocol primitives underneath downstream consumers such as zlay, zds, pub-search, docs publishing, and atproto-bench.</desc>
+  <rect width="960" height="600" rx="18" fill="#fbfaf7"/>
+  <rect x="24" y="24" width="912" height="552" rx="14" fill="#ffffff" stroke="#ded8cc"/>
+
+  <text x="56" y="70" fill="#202124" font-size="28" font-weight="750">why zig here</text>
+  <text x="56" y="98" fill="#68635b" font-size="15">zat tries to keep the protocol substrate small enough to read and fast enough to run hot</text>
+
+  <g transform="translate(74 145)">
+    <rect x="0" y="0" width="812" height="76" rx="12" fill="#f3f7fb" stroke="#c9ddea"/>
+    <text x="28" y="32" fill="#17455d" font-size="15" font-weight="700">downstream programs</text>
+    <g fill="#ffffff" stroke="#abc7d8">
+      <rect x="28" y="44" width="104" height="26" rx="7"/>
+      <rect x="150" y="44" width="104" height="26" rx="7"/>
+      <rect x="272" y="44" width="120" height="26" rx="7"/>
+      <rect x="410" y="44" width="144" height="26" rx="7"/>
+      <rect x="572" y="44" width="150" height="26" rx="7"/>
+    </g>
+    <g fill="#17455d" font-size="13" font-weight="650" text-anchor="middle">
+      <text x="80" y="62">zlay</text>
+      <text x="202" y="62">zds</text>
+      <text x="332" y="62">pub-search</text>
+      <text x="482" y="62">publish-docs</text>
+      <text x="647" y="62">atproto-bench</text>
+    </g>
+  </g>
+
+  <g transform="translate(74 250)">
+    <rect x="0" y="0" width="812" height="224" rx="12" fill="#f7fbf8" stroke="#cde1d8"/>
+    <text x="28" y="34" fill="#174d43" font-size="16" font-weight="750">zat</text>
+    <text x="64" y="34" fill="#5f8077" font-size="13">protocol pieces written close to the bytes</text>
+
+    <g transform="translate(28 62)">
+      <rect x="0" y="0" width="180" height="52" rx="9" fill="#ffffff" stroke="#9ec9bb"/>
+      <text x="90" y="23" text-anchor="middle" fill="#174d43" font-size="14" font-weight="700">syntax</text>
+      <text x="90" y="40" text-anchor="middle" fill="#66877e" font-size="11">DID, handle, NSID, AT URI</text>
+    </g>
+    <g transform="translate(222 62)">
+      <rect x="0" y="0" width="180" height="52" rx="9" fill="#ffffff" stroke="#9ec9bb"/>
+      <text x="90" y="23" text-anchor="middle" fill="#174d43" font-size="14" font-weight="700">repo data</text>
+      <text x="90" y="40" text-anchor="middle" fill="#66877e" font-size="11">CBOR, CID, CAR, MST</text>
+    </g>
+    <g transform="translate(416 62)">
+      <rect x="0" y="0" width="180" height="52" rx="9" fill="#ffffff" stroke="#9ec9bb"/>
+      <text x="90" y="23" text-anchor="middle" fill="#174d43" font-size="14" font-weight="700">trust</text>
+      <text x="90" y="40" text-anchor="middle" fill="#66877e" font-size="11">keys, JWT, repo verification</text>
+    </g>
+    <g transform="translate(610 62)">
+      <rect x="0" y="0" width="174" height="52" rx="9" fill="#ffffff" stroke="#9ec9bb"/>
+      <text x="87" y="23" text-anchor="middle" fill="#174d43" font-size="14" font-weight="700">network</text>
+      <text x="87" y="40" text-anchor="middle" fill="#66877e" font-size="11">XRPC, OAuth, firehose</text>
+    </g>
+
+    <g transform="translate(72 146)">
+      <rect x="0" y="0" width="668" height="46" rx="9" fill="#eef6f2" stroke="#c7ded4"/>
+      <text x="334" y="29" text-anchor="middle" fill="#2b6b5d" font-size="14" font-weight="700">one runtime dependency, lazy official interop fixtures for tests, binaries for tools</text>
+    </g>
+  </g>
+
+  <g transform="translate(74 506)">
+    <rect x="0" y="0" width="250" height="44" rx="10" fill="#fff7ed" stroke="#ead6bd"/>
+    <text x="125" y="27" text-anchor="middle" fill="#6f4419" font-size="14" font-weight="700">small dependency surface</text>
+    <rect x="282" y="0" width="250" height="44" rx="10" fill="#fff7ed" stroke="#ead6bd"/>
+    <text x="407" y="27" text-anchor="middle" fill="#6f4419" font-size="14" font-weight="700">arena-friendly parsing</text>
+    <rect x="564" y="0" width="248" height="44" rx="10" fill="#fff7ed" stroke="#ead6bd"/>
+    <text x="688" y="27" text-anchor="middle" fill="#6f4419" font-size="14" font-weight="700">portable little binaries</text>
+  </g>
+
+  <path d="M480 221 L480 250" stroke="#8aa9bb" stroke-width="3" marker-end="url(#arrow-blue)"/>
+  <path d="M480 474 L480 506" stroke="#9fc1b4" stroke-width="3" marker-end="url(#arrow-green)"/>
+
+  <defs>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8aa9bb"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9fc1b4"/>
+    </marker>
+  </defs>
+</svg>
