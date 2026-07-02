@@ -1,6 +1,7 @@
-//! end-to-end repo verification
+//! repo commit layer: build/sign, load, and verify
 //!
-//! exercises the full AT Protocol trust chain:
+//! the produce side builds and signs a commit (`signCommit`), and the consume
+//! side verifies it against the full AT Protocol trust chain:
 //!   handle → DID → DID document → signing key
 //!                                       ↓
 //!   repo CAR → commit → signature ← verified against key
@@ -19,6 +20,7 @@ const HttpTransport = @import("../xrpc/transport.zig").HttpTransport;
 const multibase = @import("../crypto/multibase.zig");
 const multicodec = @import("../crypto/multicodec.zig");
 const jwt = @import("../crypto/jwt.zig");
+const Keypair = @import("../crypto/keypair.zig").Keypair;
 const cbor = @import("cbor.zig");
 const car = @import("car.zig");
 const mst = @import("mst.zig");
@@ -242,6 +244,67 @@ pub fn encodeUnsignedCommit(allocator: Allocator, commit: cbor.Value) ![]u8 {
 
     const unsigned_value: cbor.Value = .{ .map = unsigned_entries.items };
     return cbor.encodeAlloc(allocator, unsigned_value);
+}
+
+/// parameters for building a signed AT Protocol repo commit (data model v3).
+pub const CommitParams = struct {
+    /// repo DID the commit belongs to.
+    did: []const u8,
+    /// commit revision TID; must increase monotonically per repo.
+    rev: []const u8,
+    /// CID of the MST root — the repo's "data" pointer.
+    data: cbor.Cid,
+    /// CID of the previous commit, or null for the first commit.
+    prev: ?cbor.Cid = null,
+    /// commit data-model version. AT Protocol currently requires 3.
+    version: u64 = 3,
+};
+
+/// a signed commit block ready to embed in a CAR or firehose frame.
+pub const SignedCommit = struct {
+    /// CID of the signed commit block.
+    cid: cbor.Cid,
+    /// canonical DAG-CBOR bytes of the signed commit.
+    bytes: []const u8,
+
+    pub fn deinit(self: SignedCommit, allocator: Allocator) void {
+        allocator.free(self.cid.raw);
+        allocator.free(self.bytes);
+    }
+};
+
+/// build and sign an AT Protocol repo commit.
+///
+/// producer-side counterpart to `verifyCommitCar`: assembles the canonical
+/// unsigned commit, signs its DAG-CBOR bytes with `keypair`, and returns the
+/// signed commit block plus its CID. the resulting signature verifies under
+/// `verifyCommitCar` / `verifyCommitDiff` against the keypair's public key.
+///
+/// caller owns the returned `SignedCommit` and must `deinit` it.
+pub fn signCommit(
+    allocator: Allocator,
+    params: CommitParams,
+    keypair: *const Keypair,
+) !SignedCommit {
+    const unsigned_entries = [_]cbor.Value.MapEntry{
+        .{ .key = "did", .value = .{ .text = params.did } },
+        .{ .key = "version", .value = .{ .unsigned = params.version } },
+        .{ .key = "data", .value = .{ .cid = params.data } },
+        .{ .key = "rev", .value = .{ .text = params.rev } },
+        .{ .key = "prev", .value = if (params.prev) |p| .{ .cid = p } else .null },
+    };
+
+    const unsigned_bytes = try cbor.encodeAlloc(allocator, .{ .map = &unsigned_entries });
+    defer allocator.free(unsigned_bytes);
+    const sig = try keypair.sign(unsigned_bytes);
+
+    const signed_entries = unsigned_entries ++ [_]cbor.Value.MapEntry{
+        .{ .key = "sig", .value = .{ .bytes = &sig.bytes } },
+    };
+    const signed_bytes = try cbor.encodeAlloc(allocator, .{ .map = &signed_entries });
+    errdefer allocator.free(signed_bytes);
+    const cid = try cbor.Cid.forDagCbor(allocator, signed_bytes);
+    return .{ .cid = cid, .bytes = signed_bytes };
 }
 
 const MstWalkOptions = struct {
@@ -566,6 +629,60 @@ test "verifyCommitDiff: build tree, serialize partial CAR, verify inversion" {
     try std.testing.expect(!std.mem.eql(u8, prev_data_cid.raw, new_data_cid.raw));
 }
 
+test "signCommit round-trips through verifyCommitCar" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // real MST root so verify_mst walks a genuine tree
+    var tree = mst.Mst.init(a);
+    try tree.put("app.bsky.feed.post/3k2abcdefghij", try cbor.Cid.forDagCbor(a, "record1"));
+    try tree.put("app.bsky.feed.post/3k2abcdefghik", try cbor.Cid.forDagCbor(a, "record2"));
+    const data_cid = try tree.rootCid();
+
+    const keypair = try Keypair.fromSecretKey(.p256, .{7} ** 32);
+    const did = try keypair.did(a);
+
+    const signed = try signCommit(a, .{
+        .did = did,
+        .rev = "3k2abcdefghij",
+        .data = data_cid,
+    }, &keypair);
+
+    // assemble a full-repo CAR: commit root + all MST blocks
+    var blocks: std.ArrayList(car.Block) = .empty;
+    try blocks.append(a, .{ .cid_raw = signed.cid.raw, .data = signed.bytes });
+    try tree.collectBlocks(&blocks);
+    const car_bytes = try car.writeAlloc(a, .{
+        .roots = &.{signed.cid},
+        .blocks = blocks.items,
+    });
+
+    const pubkey = try keypair.publicKey();
+    const result = try verifyCommitCar(a, car_bytes, .{ .key_type = .p256, .raw = &pubkey }, .{
+        .expected_did = did,
+    });
+    try std.testing.expectEqualStrings(did, result.commit_did);
+    try std.testing.expectEqual(@as(i64, 3), result.commit_version);
+    try std.testing.expectEqualStrings("3k2abcdefghij", result.commit_rev);
+}
+
+test "signCommit rev change produces a different signature and CID" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const keypair = try Keypair.fromSecretKey(.p256, .{9} ** 32);
+    const did = try keypair.did(a);
+    const data_cid = try cbor.Cid.forDagCbor(a, "mst-root");
+
+    const first = try signCommit(a, .{ .did = did, .rev = "3k2aaaaaaaaaa", .data = data_cid }, &keypair);
+    const second = try signCommit(a, .{ .did = did, .rev = "3k2bbbbbbbbbb", .data = data_cid, .prev = first.cid }, &keypair);
+
+    try std.testing.expect(!std.mem.eql(u8, first.cid.raw, second.cid.raw));
+    try std.testing.expect(!std.mem.eql(u8, first.bytes, second.bytes));
+}
+
 test "loadCommitFromCAR extracts commit fields" {
     // build a minimal valid commit CAR
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -750,7 +867,7 @@ test "loadCompleteCommitFromCAR catches block-boundary truncation" {
 }
 
 // stress test: pfrazee.com (~192k records on bsky.network)
-// run manually with: zig test src/internal/repo/repo_verifier.zig --
+// run manually with: zig test src/internal/repo/repo.zig --
 //   not included in `zig build test` — too slow for CI
 //
 // test "verify repo - pfrazee.com (stress)" {

@@ -138,6 +138,23 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "run CBOR codec benchmarks");
     bench_step.dependOn(&run_bench.step);
 
+    // commit build + sign benchmark (PDS write hot path)
+    const commit_sign_bench = b.addExecutable(.{
+        .name = "commit-sign-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("scripts/commit_sign_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "zat", .module = mod }},
+        }),
+    });
+    b.installArtifact(commit_sign_bench);
+
+    const run_commit_sign_bench = b.addRunArtifact(commit_sign_bench);
+    const commit_sign_bench_step = b.step("commit-sign-bench", "benchmark zat.signCommit across key types");
+    commit_sign_bench_step.dependOn(&run_commit_sign_bench.step);
+
     // publish-docs script (uses zat to publish docs to ATProto)
     const publish_docs = b.addExecutable(.{
         .name = "publish-docs",

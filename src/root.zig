@@ -38,20 +38,23 @@ pub const mst = @import("internal/repo/mst.zig");
 pub const cbor = @import("internal/repo/cbor.zig");
 pub const car = @import("internal/repo/car.zig");
 
-// repo verification
-const repo_verifier = @import("internal/repo/repo_verifier.zig");
-pub const verifyRepo = repo_verifier.verifyRepo;
-pub const VerifyResult = repo_verifier.VerifyResult;
-pub const verifyCommitCar = repo_verifier.verifyCommitCar;
-pub const CommitVerifyResult = repo_verifier.CommitVerifyResult;
+// repo commit layer: build/sign, load, and verify
+const repo = @import("internal/repo/repo.zig");
+pub const verifyRepo = repo.verifyRepo;
+pub const VerifyResult = repo.VerifyResult;
+pub const verifyCommitCar = repo.verifyCommitCar;
+pub const CommitVerifyResult = repo.CommitVerifyResult;
+pub const signCommit = repo.signCommit;
+pub const CommitParams = repo.CommitParams;
+pub const SignedCommit = repo.SignedCommit;
 
 // sync 1.1: commit diff verification
 pub const MstOperation = mst.Operation;
-pub const Commit = repo_verifier.Commit;
-pub const LoadedCommitCar = repo_verifier.LoadedCommitCar;
-pub const loadCommitFromCAR = repo_verifier.loadCommitFromCAR;
-pub const verifyCommitDiff = repo_verifier.verifyCommitDiff;
-pub const CommitDiffResult = repo_verifier.CommitDiffResult;
+pub const Commit = repo.Commit;
+pub const LoadedCommitCar = repo.LoadedCommitCar;
+pub const loadCommitFromCAR = repo.loadCommitFromCAR;
+pub const verifyCommitDiff = repo.verifyCommitDiff;
+pub const CommitDiffResult = repo.CommitDiffResult;
 
 // sync / streaming
 const sync = @import("internal/streaming/sync.zig");
@@ -77,7 +80,7 @@ pub const FirehoseEvent = firehose.Event;
 comptime {
     if (@import("builtin").is_test) {
         _ = @import("internal/testing/interop_tests.zig");
-        _ = @import("internal/repo/repo_verifier.zig");
+        _ = @import("internal/repo/repo.zig");
         _ = @import("internal/repo/cbor_test.zig");
         _ = @import("internal/repo/cbor_read_test.zig");
         _ = @import("internal/repo/cbor_write_test.zig");
