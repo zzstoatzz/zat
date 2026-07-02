@@ -1,5 +1,15 @@
 # changelog
 
+## 0.3.10
+
+- **feat**: `zat.signCommit(allocator, params, keypair)` builds and signs a canonical AT Protocol repo commit (`did`/`version:3`/`data`/`rev`/`prev`), returning the signed block bytes and its CID. This is the produce-side mirror of `verifyCommitCar`; a round-trip test signs a real MST-backed commit and verifies it back through the verifier. Downstream PDS-shaped consumers no longer need to hand-roll the commit CBOR.
+- **fix**: harden AT URI parsing in `internal/syntax/at_uri.zig`.
+- **fix**: adopt recent Atmos-inspired hardening in DID resolution, handle resolution, and XRPC retry behavior.
+- **refactor**: rename `internal/repo/repo_verifier.zig` to `internal/repo/repo.zig` now that the file holds both the produce (`signCommit`) and verify sides. Public export names are unchanged.
+- **test**: wire the full Bluesky syntax interop corpus into the suite.
+- **bench**: add `zig build commit-sign-bench` for the PDS commit-sign hot path.
+- **docs**: add devlog 014 on post-shaped files.
+
 ## 0.3.9
 
 - **fix**: harden MST node decoding by rejecting duplicate or non-canonical node and entry keys, trailing bytes, oversized entry arrays, and oversized prefix lengths.
